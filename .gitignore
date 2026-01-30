@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+env.bak/
+venv.bak/
+
+# Logs
+*.log
+simulation_log.txt
+
+# State files
+simulation_state.json
+
+# Configuration with secrets
+config.ini
+
+# IDE settings
+.vscode/
+.idea/
