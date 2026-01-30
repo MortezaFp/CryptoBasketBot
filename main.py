@@ -10,6 +10,7 @@ import time
 import sys
 import os
 import logging
+import threading
 import configparser
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, List, Optional, Tuple, Any
@@ -205,19 +206,39 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
 
-    def send_message(self, message: str):
-        """Send a text message to the configured chat"""
+    def send_message(self, message: str, retries=5):
+        """Send a text message to the configured chat in a background thread"""
         if not self.bot_token or not self.chat_id:
             return
 
+        # Start background thread so we don't block the trading loop
+        t = threading.Thread(target=self._send_thread, args=(message, retries))
+        t.daemon = True  # Daemon thread won't prevent program exit
+        t.start()
+
+    def _send_thread(self, message: str, retries: int):
+        """Internal method to execute the sending with retries"""
         url = f"{self.base_url}/sendMessage"
         payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"}
 
-        try:
-            # We don't set proxies here - assuming system level proxy (Windows) handles it
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            logger.error(f"⚠️ Telegram Notification Failed: {e}")
+        for i in range(retries):
+            try:
+                # We don't set proxies here - assuming system level proxy (Windows) handles it
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code == 200:
+                    return
+                logger.warning(
+                    f"⚠️ Telegram send failed (Attempt {i+1}/{retries}): {response.text}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Telegram connection failed (Attempt {i+1}/{retries}): {e}"
+                )
+
+            if i < retries - 1:
+                time.sleep(2)  # Short pause between retries
+
+        logger.error("❌ Telegram Notification Failed to send after multiple retries.")
 
 
 def load_config() -> str:
@@ -352,10 +373,7 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
             if abs(deviation) > threshold:
                 icon = "⚠️"  # Rebalance needed
 
-            msg += (
-                f"{icon} <b>{coin}</b>: ${cur:.1f} ({deviation*100:+.1f}%)\n"
-                f"   Target: {target_pct*100}% | Thr: {threshold*100:.1f}%\n"
-            )
+            msg += f"{icon} <b>{coin}</b>: ${p:,.2f} | ${cur:.1f} ({deviation*100:+.1f}%)\n"
 
         notifier.send_message(msg)
 
