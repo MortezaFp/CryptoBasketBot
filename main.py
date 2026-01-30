@@ -197,6 +197,29 @@ class WallexAPI:
 # --- Helper Functions (Adapted for Robustness) ---
 
 
+class TelegramNotifier:
+    """Simple Telegram Notification Handler"""
+
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+
+    def send_message(self, message: str):
+        """Send a text message to the configured chat"""
+        if not self.bot_token or not self.chat_id:
+            return
+
+        url = f"{self.base_url}/sendMessage"
+        payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"}
+
+        try:
+            # We don't set proxies here - assuming system level proxy (Windows) handles it
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"⚠️ Telegram Notification Failed: {e}")
+
+
 def load_config() -> str:
     """Load API key from config.ini or environment variables"""
     api_key = os.environ.get("WALLEX_API_KEY")
@@ -229,7 +252,7 @@ def get_all_market_info(api: WallexAPI) -> Dict[str, Dict]:
     return market_map
 
 
-def run_rebalance_cycle(api: WallexAPI):
+def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
     """Main logic for a single rebalancing cycle"""
     logger.info("--- Starting Rebalance Cycle ---")
 
@@ -297,6 +320,44 @@ def run_rebalance_cycle(api: WallexAPI):
         portfolio_value_usdt += value
 
     logger.info(f"💰 Total Portfolio Value: ${portfolio_value_usdt:,.2f} USDT")
+
+    if notifier:
+        # Build a detailed status message for Telegram
+        msg = (
+            f"⏱ <b>CYCLE REPORT</b>\n💰 Total: <b>${portfolio_value_usdt:,.2f}</b>\n\n"
+        )
+
+        # Sort by coin name or value
+        for coin in sorted(TARGET_ALLOCATION.keys()):
+            if coin not in asset_values:
+                continue
+
+            p = prices.get(coin, 0)
+            cur = asset_values[coin]
+            target_pct = TARGET_ALLOCATION[coin]
+            deviation = (
+                (cur - (portfolio_value_usdt * Decimal(str(target_pct))))
+                / (portfolio_value_usdt * Decimal(str(target_pct)))
+                if portfolio_value_usdt > 0
+                else 0
+            )
+
+            threshold = THRESHOLDS.get(coin, REBALANCE_THRESHOLD_DEFAULT)
+            # Check for volatility
+            week_change = abs(changes_7d.get(coin, 0))
+            if week_change > 15:
+                threshold += 0.02
+
+            icon = "✅"
+            if abs(deviation) > threshold:
+                icon = "⚠️"  # Rebalance needed
+
+            msg += (
+                f"{icon} <b>{coin}</b>: ${cur:.1f} ({deviation*100:+.1f}%)\n"
+                f"   Target: {target_pct*100}% | Thr: {threshold*100:.1f}%\n"
+            )
+
+        notifier.send_message(msg)
 
     if portfolio_value_usdt < 10:
         logger.warning("Portfolio too small to rebalance.")
@@ -382,6 +443,11 @@ def run_rebalance_cycle(api: WallexAPI):
         logger.info(
             f"      -> Executing LIMIT SELL for {coin}: {qty} @ ${limit_p:,.2f}"
         )
+        if notifier:
+            notifier.send_message(
+                f"📉 <b>SELL EXECUTION</b>\nSelling {qty} #{coin} @ ${limit_p:,.2f}"
+            )
+
         api.create_order(f"{t['coin']}USDT", "SELL", qty, price=limit_p)
         time.sleep(1)
 
@@ -394,6 +460,10 @@ def run_rebalance_cycle(api: WallexAPI):
             logger.warning(
                 f"🛑 CIRCUIT BREAKER: Skipping BUY for {coin}. Drop {change:.2f}% < {PANIC_DROP_THRESHOLD}%"
             )
+            if notifier:
+                notifier.send_message(
+                    f"🛑 <b>CIRCUIT BREAKER</b>\nSkipping BUY for #{coin}. Drop {change:.2f}%"
+                )
             continue
 
         # [Strategy #3: Don't catch falling knife]
@@ -413,6 +483,11 @@ def run_rebalance_cycle(api: WallexAPI):
         qty = t["amount"].quantize(Decimal(precision_str), rounding=ROUND_DOWN)
 
         logger.info(f"      -> Executing LIMIT BUY for {coin}: {qty} @ ${limit_p:,.2f}")
+        if notifier:
+            notifier.send_message(
+                f"📈 <b>BUY EXECUTION</b>\nBuying {qty} #{coin} @ ${limit_p:,.2f}"
+            )
+
         api.create_order(f"{coin}USDT", "BUY", qty, price=limit_p)
         time.sleep(1)
 
@@ -427,11 +502,31 @@ def main():
     print("==========================================\n")
 
     api_key = load_config()
+
+    # Init Telegram
+    config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+    notifier = None
+    if os.path.exists(config_path):
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        if config.has_section("telegram"):
+            token = config.get("telegram", "bot_token", fallback="")
+            chat_id = config.get("telegram", "chat_id", fallback="")
+            if token and chat_id:
+                try:
+                    notifier = TelegramNotifier(token, chat_id)
+                    notifier.send_message(
+                        "🤖 <b>Bot Started</b>\nListening for opportunities..."
+                    )
+                    logger.info(f"✓ Telegram Notification Enabled")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to init Telegram: {e}")
+
     api = WallexAPI(api_key)
 
     while True:
         try:
-            run_rebalance_cycle(api)
+            run_rebalance_cycle(api, notifier)
         except Exception as e:
             logger.error(f"Critical Error in main loop: {e}", exc_info=True)
             # Logic to handle persistent errors could go here (e.g. backoff)

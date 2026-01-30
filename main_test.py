@@ -235,6 +235,12 @@ class SimulationWallexAPI(main.WallexAPI):
             f"   Holdings: { {k: f'{v:.4f}' for k, v in self.balances.items() if v > 0} }\n"
         )
         sim_logger.info(log_msg)
+        return {
+            "total_value": total_value_usdt,
+            "profit": profit,
+            "profit_pct": profit_pct,
+            "holdings": self.balances,
+        }
 
 
 def run_simulation():
@@ -243,15 +249,50 @@ def run_simulation():
     # 1. Init Simulation
     sim_api = SimulationWallexAPI()
 
-    # 2. Infinite Loop
+    # 2. Init Telegram (Optional)
+    notifier = None
+    config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+    if os.path.exists(config_path):
+        import configparser
+
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        if config.has_section("telegram"):
+            token = config.get("telegram", "bot_token", fallback="")
+            chat_id = config.get("telegram", "chat_id", fallback="")
+            if token and chat_id:
+                try:
+                    notifier = main.TelegramNotifier(token, chat_id)
+                    notifier.send_message(
+                        "🧪 <b>Simulation Started</b>\nTesting mode active."
+                    )
+                    sim_logger.info("✓ Telegram Notification Linked")
+                except Exception as e:
+                    sim_logger.warning(f"⚠️ Failed to init Telegram: {e}")
+
+    # 3. Infinite Loop
     while True:
         try:
             # Run the rebalance logic using our Sim API
             # This will fetch REAL prices, check our FAKE balances, and execute FAKE trades
-            main.run_rebalance_cycle(sim_api)
+            main.run_rebalance_cycle(sim_api, notifier)
 
             # Print value report after every cycle
-            sim_api.print_profit_report()
+            stats = sim_api.print_profit_report()
+
+            # Send Telegram Status Update
+            if notifier:
+                msg = (
+                    f"📊 <b>SIMULATION STATUS</b>\n"
+                    f"💰 Value: <b>${stats['total_value']:,.2f}</b>\n"
+                    f"📈 P/L: <b>${stats['profit']:,.2f} ({stats['profit_pct']:+.2f}%)</b>\n"
+                    f"👜 Holdings:\n"
+                )
+                for coin, amt in stats["holdings"].items():
+                    if amt > 0:
+                        msg += f"• {coin}: {amt:.4f}\n"
+
+                notifier.send_message(msg)
 
         except KeyboardInterrupt:
             print("\nSimulation stopped by user.")
