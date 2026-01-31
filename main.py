@@ -12,6 +12,7 @@ import os
 import logging
 import threading
 import configparser
+import ctypes
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -19,8 +20,9 @@ from typing import Dict, List, Optional, Tuple, Any
 
 # Target Allocation (Total must sum to 1.0)
 TARGET_ALLOCATION = {
-    "BTC": 0.30,
-    "ETH": 0.20,
+    "BTC": 0.25,
+    "ETH": 0.15,
+    "PAXG": 0.10,  # Gold (Pax Gold)
     "USDT": 0.20,  # Base Currency
     "SOL": 0.10,
     "BNB": 0.10,
@@ -34,6 +36,7 @@ REBALANCE_THRESHOLD_DEFAULT = 0.05
 THRESHOLDS = {
     "BTC": 0.03,  # 3% (Stable)
     "ETH": 0.03,  # 3% (Stable)
+    "PAXG": 0.02,  # 2% (Stable - Gold)
     "USDT": 0.02,  # 2% (Base)
     "SOL": 0.07,  # 7% (Volatile)
     "BNB": 0.05,  # 5% (Medium)
@@ -205,6 +208,12 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
+        # Direct Proxy Configuration (SOCKS5 Local)
+        # 127.0.0.1:2080 as requested
+        self.proxies = {
+            "http": "socks5h://127.0.0.1:2080",
+            "https": "socks5h://127.0.0.1:2080",
+        }
 
     def send_message(self, message: str, retries=5):
         """Send a text message to the configured chat in a background thread"""
@@ -223,8 +232,15 @@ class TelegramNotifier:
 
         for i in range(retries):
             try:
-                # We don't set proxies here - assuming system level proxy (Windows) handles it
-                response = requests.post(url, json=payload, timeout=10)
+                # Use standard requests with proxy
+                response = requests.post(
+                    url, json=payload, timeout=10, proxies=self.proxies
+                )
+                if response.status_code == 200:
+                    return
+                logger.warning(
+                    f"⚠️ Telegram send failed (Attempt {i+1}/{retries}): {response.text}"
+                )
                 if response.status_code == 200:
                     return
                 logger.warning(
@@ -241,6 +257,13 @@ class TelegramNotifier:
         logger.error("❌ Telegram Notification Failed to send after multiple retries.")
 
 
+def get_app_path():
+    """Get the base path of the application, compatible with PyInstaller"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def load_config() -> str:
     """Load API key from config.ini or environment variables"""
     api_key = os.environ.get("WALLEX_API_KEY")
@@ -248,7 +271,7 @@ def load_config() -> str:
         logger.info("✓ API Key loaded from environment variable")
         return api_key
 
-    config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+    config_path = os.path.join(get_app_path(), "config.ini")
     if os.path.exists(config_path):
         config = configparser.ConfigParser()
         config.read(config_path)
@@ -257,7 +280,7 @@ def load_config() -> str:
             logger.info("✓ API Key loaded from config.ini")
             return api_key
 
-    logger.critical("❌ ERROR: API Key not found!")
+    logger.critical(f"❌ ERROR: API Key not found! Checked: {config_path}")
     sys.exit(1)
 
 
@@ -466,7 +489,7 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
                 f"📉 <b>SELL EXECUTION</b>\nSelling {qty} #{coin} @ ${limit_p:,.2f}"
             )
 
-        api.create_order(f"{t['coin']}USDT", "SELL", qty, price=limit_p)
+        api.create_order(f"{t['coin']}USDT", "SELL", qty, type="LIMIT", price=limit_p)
         time.sleep(1)
 
     # Execute Buys (with Circuit Breaker & Trend Filter)
@@ -506,7 +529,7 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
                 f"📈 <b>BUY EXECUTION</b>\nBuying {qty} #{coin} @ ${limit_p:,.2f}"
             )
 
-        api.create_order(f"{coin}USDT", "BUY", qty, price=limit_p)
+        api.create_order(f"{coin}USDT", "BUY", qty, type="LIMIT", price=limit_p)
         time.sleep(1)
 
     logger.info("--- Cycle Complete ---")
@@ -522,7 +545,7 @@ def main():
     api_key = load_config()
 
     # Init Telegram
-    config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+    config_path = os.path.join(get_app_path(), "config.ini")
     notifier = None
     if os.path.exists(config_path):
         config = configparser.ConfigParser()
@@ -554,4 +577,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Set Console Title for standalone window
+    if os.name == "nt":
+        ctypes.windll.kernel32.SetConsoleTitleW("Wallex Crypto Basket Bot - LIVE")
     main()

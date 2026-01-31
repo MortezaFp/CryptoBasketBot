@@ -23,3 +23,12 @@ config.ini
 # IDE settings
 .vscode/
 .idea/
+
+# PyInstaller / Build artifacts
+build/
+dist/
+*.spec
+*.exe
+Launch_Simulation.bat
+Launch_WallexBot.bat
+pyinstaller.txt

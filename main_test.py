@@ -6,6 +6,7 @@ Backtesting/Paper Loading script using main.py logic but with simulated balances
 import time
 import logging
 import sys
+import ctypes
 from decimal import Decimal, ROUND_DOWN
 import main  # Import the real bot logic
 
@@ -14,8 +15,8 @@ import os
 
 # Constants
 INITIAL_USDT = Decimal("1000")
-SIMULATION_LOG_FILE = "simulation_log.txt"
-SIMULATION_STATE_FILE = "simulation_state.json"
+SIMULATION_LOG_FILE = os.path.join(main.get_app_path(), "simulation_log.txt")
+SIMULATION_STATE_FILE = os.path.join(main.get_app_path(), "simulation_state.json")
 SLEEP_INTERVAL = 3600  # Keep same as main, or lower for faster testing if desired
 
 # Setup Simulation Logging
@@ -251,7 +252,7 @@ def run_simulation():
 
     # 2. Init Telegram (Optional)
     notifier = None
-    config_path = os.path.join(os.path.dirname(__file__), "config.ini")
+    config_path = os.path.join(main.get_app_path(), "config.ini")
     if os.path.exists(config_path):
         import configparser
 
@@ -305,4 +306,9 @@ def run_simulation():
 
 
 if __name__ == "__main__":
+    # Set Console Title for standalone window
+    if os.name == "nt":
+        ctypes.windll.kernel32.SetConsoleTitleW(
+            "Wallex Bot SIMULATION - [Testing Mode]"
+        )
     run_simulation()
