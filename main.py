@@ -22,8 +22,8 @@ from typing import Dict, List, Optional, Tuple, Any
 TARGET_ALLOCATION = {
     "BTC": 0.25,
     "ETH": 0.15,
-    "PAXG": 0.10,  # Gold (Pax Gold)
-    "USDT": 0.20,  # Base Currency
+    "PAXG": 0.15,  # Gold (Pax Gold)
+    "USDT": 0.15,  # Base Currency
     "SOL": 0.10,
     "BNB": 0.10,
     "XRP": 0.10,
@@ -366,6 +366,7 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
     logger.info(f"💰 Total Portfolio Value: ${portfolio_value_usdt:,.2f} USDT")
 
     if notifier:
+        notifier.send_message("➖➖➖➖➖➖➖➖➖➖")
         # Build a detailed status message for Telegram
         msg = (
             f"⏱ <b>CYCLE REPORT</b>\n💰 Total: <b>${portfolio_value_usdt:,.2f}</b>\n\n"
@@ -531,6 +532,66 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
 
         api.create_order(f"{coin}USDT", "BUY", qty, type="LIMIT", price=limit_p)
         time.sleep(1)
+
+    # Send Cycle Report after completing orders
+    if (sells or buys) and notifier:
+        # Re-fetch balances to get updated portfolio state
+        balances_resp = api.get_account_balances()
+        if balances_resp.get("success"):
+            balance_map_updated = {}
+            for coin, data in (
+                balances_resp.get("result", {}).get("balances", {}).items()
+            ):
+                balance_map_updated[coin] = Decimal(str(data.get("value", 0)))
+
+            # Recalculate portfolio values
+            asset_values_updated = {}
+            portfolio_value_updated = Decimal("0")
+
+            # Handle USDT
+            stock_usdt_updated = balance_map_updated.get("USDT", Decimal("0"))
+            asset_values_updated["USDT"] = stock_usdt_updated
+            portfolio_value_updated += stock_usdt_updated
+
+            # Handle other coins
+            for coin in TARGET_ALLOCATION:
+                if coin == "USDT":
+                    continue
+                balance_updated = balance_map_updated.get(coin, Decimal("0"))
+                value_updated = balance_updated * prices[coin]
+                asset_values_updated[coin] = value_updated
+                portfolio_value_updated += value_updated
+
+            # Build and send the cycle report
+            msg = f"⏱ <b>POST-TRADE REPORT</b>\n💰 Total: <b>${portfolio_value_updated:,.2f}</b>\n\n"
+
+            for coin in sorted(TARGET_ALLOCATION.keys()):
+                if coin not in asset_values_updated:
+                    continue
+
+                p = prices.get(coin, 0)
+                cur = asset_values_updated[coin]
+                target_pct = TARGET_ALLOCATION[coin]
+                deviation = (
+                    (cur - (portfolio_value_updated * Decimal(str(target_pct))))
+                    / (portfolio_value_updated * Decimal(str(target_pct)))
+                    if portfolio_value_updated > 0
+                    else 0
+                )
+
+                threshold = THRESHOLDS.get(coin, REBALANCE_THRESHOLD_DEFAULT)
+                # Check for volatility
+                week_change = abs(changes_7d.get(coin, 0))
+                if week_change > 15:
+                    threshold += 0.02
+
+                icon = "✅"
+                if abs(deviation) > threshold:
+                    icon = "⚠️"  # Rebalance needed
+
+                msg += f"{icon} <b>{coin}</b>: ${p:,.2f} | ${cur:.1f} ({deviation*100:+.1f}%)\n"
+
+            notifier.send_message(msg)
 
     logger.info("--- Cycle Complete ---")
 
