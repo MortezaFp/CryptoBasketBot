@@ -42,7 +42,7 @@ THRESHOLDS = {
     "BNB": 0.05,  # 5% (Medium)
     "XRP": 0.07,  # 7% (Volatile)
 }
-MIN_TRADE_USDT = 10.0  # Minimum trade size in USDT
+MIN_TRADE_USDT = 1.0  # Minimum trade size in USDT
 PANIC_DROP_THRESHOLD = -15.0  # -15% 24h change circuit breaker for BUYs
 SLEEP_INTERVAL = 3600  # Run every 1 hour (3600 seconds)
 
