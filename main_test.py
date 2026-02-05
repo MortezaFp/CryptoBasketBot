@@ -68,6 +68,8 @@ class SimulationWallexAPI(main.WallexAPI):
             self.initial_value = INITIAL_USDT
             sim_logger.info(f"--- SIMULATION STARTED (FRESH) ---")
 
+        self._orders = {}
+
         sim_logger.info(
             f"Balance: {self.balances['USDT']:.2f} USDT (Total assets tracking)"
         )
@@ -116,6 +118,7 @@ class SimulationWallexAPI(main.WallexAPI):
         quantity: Decimal,
         type: str = "MARKET",
         price: Decimal = None,
+        client_id: str = None,
     ) -> dict:
         """
         Execute a simulated trade.
@@ -185,18 +188,36 @@ class SimulationWallexAPI(main.WallexAPI):
 
             self.save_state()
 
-        # Return success response
-        return {
-            "success": True,
-            "result": {
-                "orderId": f"SIM-{int(time.time())}",
-                "symbol": symbol,
-                "origQty": str(quantity),
-                "executedQty": str(quantity),
-                "price": str(trade_price),
-                "type": type,
-            },
+        client_order_id = client_id or f"SIM-{int(time.time())}"
+        order_result = {
+            "clientOrderId": client_order_id,
+            "symbol": symbol,
+            "origQty": str(quantity),
+            "executedQty": str(quantity),
+            "price": str(trade_price),
+            "type": type,
+            "side": side,
+            "status": "FILLED",
+            "executedPercent": 100,
         }
+        self._orders[client_order_id] = order_result
+
+        return {"success": True, "result": order_result}
+
+    def get_order(self, client_id: str) -> dict:
+        order = self._orders.get(client_id)
+        if not order:
+            return {"success": False, "message": "Order not found"}
+        return {"success": True, "result": order}
+
+    def cancel_order(self, client_id: str) -> dict:
+        order = self._orders.get(client_id)
+        if not order:
+            return {"success": False, "message": "Order not found"}
+        if order.get("status") not in {"FILLED", "CANCELED", "CANCELLED"}:
+            order["status"] = "CANCELED"
+        self._orders[client_id] = order
+        return {"success": True, "result": order}
 
     def print_profit_report(self):
         """Calculate and print current profit/loss"""
@@ -271,7 +292,10 @@ def run_simulation():
                 except Exception as e:
                     sim_logger.warning(f"⚠️ Failed to init Telegram: {e}")
 
-    # 3. Infinite Loop
+    run_once = os.environ.get("RUN_ONCE", "").lower() == "true"
+    in_github_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+
+    # 3. Loop (or run once)
     while True:
         try:
             # Run the rebalance logic using our Sim API
@@ -300,6 +324,9 @@ def run_simulation():
             break
         except Exception as e:
             sim_logger.error(f"Critical Simulation Error: {e}", exc_info=True)
+
+        if run_once or in_github_actions:
+            break
 
         sim_logger.info(f"Sleeping for {SLEEP_INTERVAL} seconds...")
         time.sleep(SLEEP_INTERVAL)

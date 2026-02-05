@@ -7,10 +7,12 @@ Based on original main.py script
 
 import requests
 import time
+import uuid
 import sys
 import os
 import logging
 import threading
+import queue
 import configparser
 import ctypes
 from decimal import Decimal, ROUND_DOWN
@@ -22,7 +24,7 @@ from typing import Dict, List, Optional, Tuple, Any
 TARGET_ALLOCATION = {
     "BTC": 0.25,
     "ETH": 0.15,
-    "PAXG": 0.15,  # Gold (Pax Gold)
+    "XAUT": 0.15,  # Gold
     "USDT": 0.15,  # Base Currency
     "SOL": 0.10,
     "BNB": 0.10,
@@ -36,7 +38,7 @@ REBALANCE_THRESHOLD_DEFAULT = 0.05
 THRESHOLDS = {
     "BTC": 0.03,  # 3% (Stable)
     "ETH": 0.03,  # 3% (Stable)
-    "PAXG": 0.02,  # 2% (Stable - Gold)
+    "XAUT": 0.02,  # 2% (Stable - Gold)
     "USDT": 0.02,  # 2% (Base)
     "SOL": 0.07,  # 7% (Volatile)
     "BNB": 0.05,  # 5% (Medium)
@@ -45,6 +47,8 @@ THRESHOLDS = {
 MIN_TRADE_USDT = 1.0  # Minimum trade size in USDT
 PANIC_DROP_THRESHOLD = -15.0  # -15% 24h change circuit breaker for BUYs
 SLEEP_INTERVAL = 3600  # Run every 1 hour (3600 seconds)
+LIMIT_ORDER_TIMEOUT_SEC = 60
+ORDER_POLL_INTERVAL_SEC = 5
 
 QUOTE_CURRENCY = "USDT"
 WALLEX_API_BASE = "https://api.wallex.ir"
@@ -133,6 +137,7 @@ class WallexAPI:
         quantity: Decimal,
         type: str = "MARKET",
         price: Decimal = None,
+        client_id: Optional[str] = None,
     ) -> Dict:
         """
         Create an order (MARKET or LIMIT)
@@ -150,6 +155,9 @@ class WallexAPI:
                 "side": side.upper(),
                 "quantity": str(quantity),
             }
+
+            if client_id:
+                payload["client_id"] = client_id
 
             if type.upper() == "LIMIT":
                 if price is None:
@@ -172,6 +180,34 @@ class WallexAPI:
             return response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Error creating {side} order for {symbol}: {e}")
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                logger.error(f"   Response: {e.response.text}")
+            raise
+
+    def get_order(self, client_id: str) -> Dict:
+        """Fetch order details by client ID"""
+        try:
+            response = self.session.get(
+                f"{WALLEX_API_BASE}/v1/account/orders/{client_id}", timeout=15
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Error fetching order {client_id}: {e}")
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                logger.error(f"   Response: {e.response.text}")
+            raise
+
+    def cancel_order(self, client_id: str) -> Dict:
+        """Cancel order by client ID"""
+        try:
+            response = self.session.delete(
+                f"{WALLEX_API_BASE}/v1/account/orders/{client_id}", timeout=15
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Error cancelling order {client_id}: {e}")
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 logger.error(f"   Response: {e.response.text}")
             raise
@@ -208,53 +244,52 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
-        # Direct Proxy Configuration (SOCKS5 Local)
-        # 127.0.0.1:2080 as requested
-        self.proxies = {
-            "http": "socks5h://127.0.0.1:2080",
-            "https": "socks5h://127.0.0.1:2080",
-        }
+        self.proxies = None
+        self._queue: "queue.Queue[Tuple[str, int]]" = queue.Queue()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
 
     def send_message(self, message: str, retries=5):
-        """Send a text message to the configured chat in a background thread"""
+        """Send a text message to the configured chat in-order"""
         if not self.bot_token or not self.chat_id:
             return
+        self._queue.put((message, retries))
 
-        # Start background thread so we don't block the trading loop
-        t = threading.Thread(target=self._send_thread, args=(message, retries))
-        t.daemon = True  # Daemon thread won't prevent program exit
-        t.start()
-
-    def _send_thread(self, message: str, retries: int):
-        """Internal method to execute the sending with retries"""
-        url = f"{self.base_url}/sendMessage"
-        payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"}
-
-        for i in range(retries):
+    def _worker_loop(self):
+        """Process telegram messages sequentially to preserve order"""
+        while True:
+            message, retries = self._queue.get()
             try:
-                # Use standard requests with proxy
-                response = requests.post(
-                    url, json=payload, timeout=10, proxies=self.proxies
-                )
-                if response.status_code == 200:
-                    return
-                logger.warning(
-                    f"⚠️ Telegram send failed (Attempt {i+1}/{retries}): {response.text}"
-                )
-                if response.status_code == 200:
-                    return
-                logger.warning(
-                    f"⚠️ Telegram send failed (Attempt {i+1}/{retries}): {response.text}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Telegram connection failed (Attempt {i+1}/{retries}): {e}"
-                )
+                url = f"{self.base_url}/sendMessage"
+                payload = {
+                    "chat_id": self.chat_id,
+                    "text": message,
+                    "parse_mode": "HTML",
+                }
 
-            if i < retries - 1:
-                time.sleep(2)  # Short pause between retries
+                for i in range(retries):
+                    try:
+                        response = requests.post(
+                            url, json=payload, timeout=10, proxies=self.proxies
+                        )
+                        if response.status_code == 200:
+                            break
+                        logger.warning(
+                            f"⚠️ Telegram send failed (Attempt {i+1}/{retries}): {response.text}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ Telegram connection failed (Attempt {i+1}/{retries}): {e}"
+                        )
 
-        logger.error("❌ Telegram Notification Failed to send after multiple retries.")
+                    if i < retries - 1:
+                        time.sleep(2)
+                else:
+                    logger.error(
+                        "❌ Telegram Notification Failed to send after multiple retries."
+                    )
+            finally:
+                self._queue.task_done()
 
 
 def get_app_path():
@@ -294,6 +329,113 @@ def get_all_market_info(api: WallexAPI) -> Dict[str, Dict]:
     for m in markets_data.get("result", {}).get("markets", []):
         market_map[m["symbol"]] = m
     return market_map
+
+
+def _to_decimal(value: Any, default: str = "0") -> Decimal:
+    try:
+        return Decimal(str(value).replace(",", ""))
+    except Exception:
+        return Decimal(default)
+
+
+def _is_order_filled(order: Dict) -> bool:
+    status = str(order.get("status", "")).upper()
+    if status in {"FILLED", "DONE", "COMPLETED", "CLOSED"}:
+        return True
+
+    executed_percent = order.get("executedPercent")
+    try:
+        if executed_percent is not None and float(executed_percent) >= 100:
+            return True
+    except Exception:
+        pass
+
+    orig_qty = _to_decimal(order.get("origQty", "0"))
+    exec_qty = _to_decimal(order.get("executedQty", "0"))
+    if orig_qty > 0 and exec_qty >= orig_qty:
+        return True
+
+    return False
+
+
+def place_limit_then_market(
+    api: WallexAPI,
+    symbol: str,
+    side: str,
+    quantity: Decimal,
+    limit_price: Decimal,
+    notifier: Optional[TelegramNotifier] = None,
+    timeout_sec: int = LIMIT_ORDER_TIMEOUT_SEC,
+    poll_interval_sec: int = ORDER_POLL_INTERVAL_SEC,
+):
+    """Place a limit order and, if not filled within timeout, cancel and market the remainder."""
+    client_id = f"bot-{uuid.uuid4().hex[:16]}"
+    order_resp = api.create_order(
+        symbol, side, quantity, type="LIMIT", price=limit_price, client_id=client_id
+    )
+
+    if not order_resp.get("success"):
+        raise Exception(f"Limit order failed: {order_resp.get('message')}")
+
+    order_client_id = order_resp.get("result", {}).get("clientOrderId") or client_id
+
+    start = time.monotonic()
+    last_status = None
+
+    while time.monotonic() - start < timeout_sec:
+        try:
+            status_resp = api.get_order(order_client_id)
+            if status_resp.get("success"):
+                order = status_resp.get("result", {})
+                last_status = order
+                if _is_order_filled(order):
+                    logger.info(f"✅ Limit order filled: {order_client_id}")
+                    return
+                status = str(order.get("status", "")).upper()
+                if status in {"CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}:
+                    break
+        except Exception as e:
+            logger.warning(f"⚠️ Order status check failed for {order_client_id}: {e}")
+
+        time.sleep(poll_interval_sec)
+
+    logger.warning(
+        f"⏳ Limit order timeout ({timeout_sec}s). Cancelling {order_client_id} and placing market order."
+    )
+    if notifier:
+        notifier.send_message(
+            f"⏳ <b>LIMIT TIMEOUT</b>\n{side} {symbol} not filled in {timeout_sec}s. Switching to MARKET."
+        )
+
+    try:
+        api.cancel_order(order_client_id)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to cancel order {order_client_id}: {e}")
+
+    if not last_status:
+        try:
+            status_resp = api.get_order(order_client_id)
+            if status_resp.get("success"):
+                last_status = status_resp.get("result", {})
+        except Exception:
+            last_status = None
+
+    orig_qty = _to_decimal(
+        (last_status or {}).get("origQty", str(quantity)), default=str(quantity)
+    )
+    exec_qty = _to_decimal((last_status or {}).get("executedQty", "0"))
+    remaining_qty = orig_qty - exec_qty
+    qty_exp = quantity.as_tuple().exponent
+    quant = Decimal("1") if qty_exp >= 0 else Decimal("1").scaleb(qty_exp)
+    remaining_qty = remaining_qty.quantize(quant, rounding=ROUND_DOWN)
+    if remaining_qty <= 0:
+        logger.info(f"✅ Order already fully executed before cancel: {order_client_id}")
+        return
+
+    logger.info(
+        f"⚡ Placing MARKET {side} for remaining {remaining_qty} {symbol} (after partial fill)."
+    )
+    api.create_order(symbol, side, remaining_qty, type="MARKET")
 
 
 def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
@@ -490,8 +632,14 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
                 f"📉 <b>SELL EXECUTION</b>\nSelling {qty} #{coin} @ ${limit_p:,.2f}"
             )
 
-        api.create_order(f"{t['coin']}USDT", "SELL", qty, type="LIMIT", price=limit_p)
-        time.sleep(1)
+        place_limit_then_market(
+            api,
+            f"{t['coin']}USDT",
+            "SELL",
+            qty,
+            limit_p,
+            notifier=notifier,
+        )
 
     # Execute Buys (with Circuit Breaker & Trend Filter)
     for t in buys:
@@ -530,8 +678,14 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
                 f"📈 <b>BUY EXECUTION</b>\nBuying {qty} #{coin} @ ${limit_p:,.2f}"
             )
 
-        api.create_order(f"{coin}USDT", "BUY", qty, type="LIMIT", price=limit_p)
-        time.sleep(1)
+        place_limit_then_market(
+            api,
+            f"{coin}USDT",
+            "BUY",
+            qty,
+            limit_p,
+            notifier=notifier,
+        )
 
     # Send Cycle Report after completing orders
     if (sells or buys) and notifier:
@@ -625,6 +779,16 @@ def main():
                     logger.warning(f"⚠️ Failed to init Telegram: {e}")
 
     api = WallexAPI(api_key)
+
+    run_once = os.environ.get("RUN_ONCE", "").lower() == "true"
+    in_github_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+
+    if run_once or in_github_actions:
+        try:
+            run_rebalance_cycle(api, notifier)
+        except Exception as e:
+            logger.error(f"Critical Error in main loop: {e}", exc_info=True)
+        return
 
     while True:
         try:
