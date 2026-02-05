@@ -273,24 +273,14 @@ def run_simulation():
 
     # 2. Init Telegram (Optional)
     notifier = None
-    config_path = os.path.join(main.get_app_path(), "config.ini")
-    if os.path.exists(config_path):
-        import configparser
-
-        config = configparser.ConfigParser()
-        config.read(config_path)
-        if config.has_section("telegram"):
-            token = config.get("telegram", "bot_token", fallback="")
-            chat_id = config.get("telegram", "chat_id", fallback="")
-            if token and chat_id:
-                try:
-                    notifier = main.TelegramNotifier(token, chat_id)
-                    notifier.send_message(
-                        "🧪 <b>Simulation Started</b>\nTesting mode active."
-                    )
-                    sim_logger.info("✓ Telegram Notification Linked")
-                except Exception as e:
-                    sim_logger.warning(f"⚠️ Failed to init Telegram: {e}")
+    token, chat_id = main.load_telegram_config()
+    if token and chat_id:
+        try:
+            notifier = main.TelegramNotifier(token, chat_id)
+            notifier.send_message("🧪 <b>Simulation Started</b>\nTesting mode active.")
+            sim_logger.info("✓ Telegram Notification Linked")
+        except Exception as e:
+            sim_logger.warning(f"⚠️ Failed to init Telegram: {e}")
 
     run_once = os.environ.get("RUN_ONCE", "").lower() == "true"
     in_github_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
@@ -326,6 +316,8 @@ def run_simulation():
             sim_logger.error(f"Critical Simulation Error: {e}", exc_info=True)
 
         if run_once or in_github_actions:
+            if notifier:
+                notifier.flush()
             break
 
         sim_logger.info(f"Sleeping for {SLEEP_INTERVAL} seconds...")

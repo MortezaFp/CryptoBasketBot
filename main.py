@@ -291,6 +291,10 @@ class TelegramNotifier:
             finally:
                 self._queue.task_done()
 
+    def flush(self):
+        """Block until all queued messages are sent"""
+        self._queue.join()
+
 
 def get_app_path():
     """Get the base path of the application, compatible with PyInstaller"""
@@ -317,6 +321,29 @@ def load_config() -> str:
 
     logger.critical(f"❌ ERROR: API Key not found! Checked: {config_path}")
     sys.exit(1)
+
+
+def load_telegram_config() -> Tuple[Optional[str], Optional[str]]:
+    """Load Telegram bot token/chat id from environment or config.ini"""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if token and chat_id:
+        logger.info("✓ Telegram config loaded from environment variables")
+        return token, chat_id
+
+    config_path = os.path.join(get_app_path(), "config.ini")
+    if os.path.exists(config_path):
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        if config.has_section("telegram"):
+            token = config.get("telegram", "bot_token", fallback="")
+            chat_id = config.get("telegram", "chat_id", fallback="")
+            if token and chat_id:
+                logger.info("✓ Telegram config loaded from config.ini")
+                return token, chat_id
+
+    return None, None
 
 
 def get_all_market_info(api: WallexAPI) -> Dict[str, Dict]:
@@ -760,23 +787,17 @@ def main():
     api_key = load_config()
 
     # Init Telegram
-    config_path = os.path.join(get_app_path(), "config.ini")
     notifier = None
-    if os.path.exists(config_path):
-        config = configparser.ConfigParser()
-        config.read(config_path)
-        if config.has_section("telegram"):
-            token = config.get("telegram", "bot_token", fallback="")
-            chat_id = config.get("telegram", "chat_id", fallback="")
-            if token and chat_id:
-                try:
-                    notifier = TelegramNotifier(token, chat_id)
-                    notifier.send_message(
-                        "🤖 <b>Bot Started</b>\nListening for opportunities..."
-                    )
-                    logger.info(f"✓ Telegram Notification Enabled")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to init Telegram: {e}")
+    token, chat_id = load_telegram_config()
+    if token and chat_id:
+        try:
+            notifier = TelegramNotifier(token, chat_id)
+            notifier.send_message(
+                "🤖 <b>Bot Started</b>\nListening for opportunities..."
+            )
+            logger.info(f"✓ Telegram Notification Enabled")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to init Telegram: {e}")
 
     api = WallexAPI(api_key)
 
@@ -788,6 +809,8 @@ def main():
             run_rebalance_cycle(api, notifier)
         except Exception as e:
             logger.error(f"Critical Error in main loop: {e}", exc_info=True)
+        if notifier:
+            notifier.flush()
         return
 
     while True:
