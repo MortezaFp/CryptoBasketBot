@@ -38,15 +38,16 @@ REBALANCE_THRESHOLD_DEFAULT = 0.05
 THRESHOLDS = {
     "BTC": 0.03,  # 3% (Stable)
     "ETH": 0.03,  # 3% (Stable)
-    "XAUT": 0.02,  # 2% (Stable - Gold)
+    "XAUT": 0.05,  # 5% (Stable - Gold) - Widened to prevent churn during crashes
     "USDT": 0.02,  # 2% (Base)
     "SOL": 0.07,  # 7% (Volatile)
     "BNB": 0.05,  # 5% (Medium)
     "XRP": 0.07,  # 7% (Volatile)
 }
-MIN_TRADE_USDT = 1.0  # Minimum trade size in USDT
-PANIC_DROP_THRESHOLD = -15.0  # -15% 24h change circuit breaker for BUYs
+MIN_TRADE_USDT = 1.0  # Kept low for smaller portfolios (e.g. $100 total)
+PANIC_DROP_THRESHOLD = -35.0  # Relaxed to -35% to allow buying deep dips
 SLEEP_INTERVAL = 3600  # Run every 1 hour (3600 seconds)
+
 LIMIT_ORDER_TIMEOUT_SEC = 60
 ORDER_POLL_INTERVAL_SEC = 5
 
@@ -394,8 +395,9 @@ def place_limit_then_market(
     notifier: Optional[TelegramNotifier] = None,
     timeout_sec: int = LIMIT_ORDER_TIMEOUT_SEC,
     poll_interval_sec: int = ORDER_POLL_INTERVAL_SEC,
+    market_on_timeout: bool = True,
 ):
-    """Place a limit order and, if not filled within timeout, cancel and market the remainder."""
+    """Place a limit order and, if not filled within timeout, cancel and market the remainder (if enabled)."""
     client_id = f"bot-{uuid.uuid4().hex[:16]}"
     order_resp = api.create_order(
         symbol, side, quantity, type="LIMIT", price=limit_price, client_id=client_id
@@ -425,6 +427,20 @@ def place_limit_then_market(
             logger.warning(f"⚠️ Order status check failed for {order_client_id}: {e}")
 
         time.sleep(poll_interval_sec)
+
+    if not market_on_timeout:
+        logger.warning(
+            f"⏳ Limit order timeout ({timeout_sec}s). {side} {symbol} - market_on_timeout=False. Cancelling only."
+        )
+        if notifier:
+            notifier.send_message(
+                f"⏳ <b>LIMIT TIMEOUT</b>\n{side} {symbol} not filled. Order Cancelled (Dip Catching)."
+            )
+        try:
+            api.cancel_order(order_client_id)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to cancel order {order_client_id}: {e}")
+        return
 
     logger.warning(
         f"⏳ Limit order timeout ({timeout_sec}s). Cancelling {order_client_id} and placing market order."
@@ -484,6 +500,8 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
     # 2. Calculate Portfolio State
     asset_values = {}  # coin -> value_in_usdt
     prices = {}  # coin -> price_usdt
+    bids = {}  # coin -> best_bid
+    asks = {}  # coin -> best_ask
     precisions = {}  # coin -> precision_int
     changes_24h = {}  # coin -> percent_change
     changes_7d = {}  # coin -> percent_change_7d
@@ -494,6 +512,8 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
     stock_usdt = balance_map.get("USDT", Decimal("0"))
     asset_values["USDT"] = stock_usdt
     prices["USDT"] = Decimal("1")
+    bids["USDT"] = Decimal("1")
+    asks["USDT"] = Decimal("1")
     portfolio_value_usdt += stock_usdt
 
     # Handle Other Coins
@@ -510,6 +530,9 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
 
         try:
             price = Decimal(str(market.get("price", 0)).replace(",", ""))
+            # Try to get bid/ask, fallback to last price if missing
+            bid = Decimal(str(market.get("bid", price)).replace(",", ""))
+            ask = Decimal(str(market.get("ask", price)).replace(",", ""))
         except:
             logger.warning(f"⚠️ Invalid price for {pair}. Skipping.")
             continue
@@ -525,6 +548,8 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
         value = balance * price
 
         prices[coin] = price
+        bids[coin] = bid
+        asks[coin] = ask
         asset_values[coin] = value
         changes_24h[coin] = change
         changes_7d[coin] = change_week
@@ -625,6 +650,16 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
                 )
                 continue
 
+            # PRICE STRATEGY: Maker First
+            # Setup initial limit price.
+            # BUY  -> Best Bid (Trying to get filled at the top of the buy wall)
+            # SELL -> Best Ask (Trying to get filled at the top of the sell wall)
+            limit_p = (
+                bids.get(coin, prices.get(coin))
+                if side == "BUY"
+                else asks.get(coin, prices.get(coin))
+            )
+
             trades.append(
                 {
                     "coin": coin,
@@ -632,7 +667,7 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
                     "amount": amount,
                     "usdt_val": trade_val_usdt,
                     "precision": precisions[coin],
-                    "limit_price": prices[coin],  # Base price, adjusted later
+                    "limit_price": limit_p,
                 }
             )
 
@@ -684,13 +719,25 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
             continue
 
         # [Strategy #3: Don't catch falling knife]
-        # If dropping moderately (-8% to -15%), place limit order LOWER
+        # Tiered Dip Catching: The harder it falls, the lower we bid
         limit_p = t["limit_price"]
-        if -15 < change < -8:
+        is_dip_catch = False
+
+        if change < -20:
+            # Massive Crash: Buy aggressively lower (Catch the wick)
+            discount = Decimal("0.95")  # Buy 5% lower
+            limit_p = limit_p * discount
+            is_dip_catch = True
+            logger.info(
+                f"      -> 'Crash Catch' check: {coin} down {change:.1f}%. Placing limit buy 5% lower @ ${limit_p:.2f}"
+            )
+        elif change < -8:
+            # Moderate Drop: Buy slightly lower
             discount = Decimal("0.98")  # Buy 2% lower
             limit_p = limit_p * discount
+            is_dip_catch = True
             logger.info(
-                f"      -> 'Falling Knife' check: {coin} down {change:.1f}%. Placing limit buy 2% lower @ ${limit_p:.2f}"
+                f"      -> 'Dip Catch' check: {coin} down {change:.1f}%. Placing limit buy 2% lower @ ${limit_p:.2f}"
             )
 
         # Quantize amount
@@ -712,6 +759,7 @@ def run_rebalance_cycle(api: WallexAPI, notifier: TelegramNotifier = None):
             qty,
             limit_p,
             notifier=notifier,
+            market_on_timeout=(not is_dip_catch),
         )
 
     # Send Cycle Report after completing orders

@@ -131,61 +131,115 @@ class SimulationWallexAPI(main.WallexAPI):
 
         trade_price = price
 
-        # 1. Determine Execution Price
-        if type == "MARKET" or trade_price is None:
-            try:
-                # This calls the PARENT class method which hits the real API
-                trade_price = self.get_market_price(symbol)
-                sim_logger.info(
-                    f"🔎 Fetched REAL price for {symbol}: ${trade_price:,.2f}"
-                )
-            except Exception as e:
-                sim_logger.error(
-                    f"Could not fetch price for {symbol} during trade: {e}"
-                )
-                raise e
-        else:
-            sim_logger.info(f"⚓ Simulating LIMIT order fill at ${trade_price:,.2f}")
+        # 1. Determine Execution Logic
+        is_filled = True
 
-        # 2. Calculate Values
-        trade_value_usdt = quantity * trade_price
-        fee_rate = Decimal("0.0035")  # Approximate fee (0.35%) - Adjust if needed
-        # Taking fee from the received asset usually
+        # Always fetch real market price for comparison/execution
+        try:
+            market_price = self.get_market_price(symbol)
+        except Exception as e:
+            sim_logger.error(f"Could not fetch price for {symbol}: {e}")
+            raise e
+
+        # Decide effective trade price and fill status
+        if type == "LIMIT":
+            if price is None:
+                raise ValueError("Limit order must have a price")
+
+            # Check for fillability
+            # BUY: Limit Price >= Market Price -> Fill (at market price, simulating taker, or limit price?)
+            # SELL: Limit Price <= Market Price -> Fill
+
+            # For simulation conservative approach:
+            # If we cross the spread, we fill at MARKET price (taker) or LIMIT price?
+            # Wallex matches at the best available price.
+            # If I Buy Limit 100, and Market is 90, I pay 90.
+            # If I Buy Limit 90, and Market is 100, I wait.
+
+            limit_p = price
+
+            if side.upper() == "BUY":
+                if limit_p >= market_price:
+                    trade_price = market_price
+                    sim_logger.info(
+                        f"✅ Limit Buy {limit_p} >= Market {market_price}. Fills immediately."
+                    )
+                else:
+                    is_filled = False
+                    sim_logger.info(
+                        f"⏳ Limit Buy {limit_p} < Market {market_price}. Order Pending."
+                    )
+            else:  # SELL
+                if limit_p <= market_price:
+                    trade_price = market_price
+                    sim_logger.info(
+                        f"✅ Limit Sell {limit_p} <= Market {market_price}. Fills immediately."
+                    )
+                else:
+                    is_filled = False
+                    sim_logger.info(
+                        f"⏳ Limit Sell {limit_p} > Market {market_price}. Order Pending."
+                    )
+
+            if not is_filled:
+                # Create Unfilled Order
+                client_order_id = client_id or f"SIM-{int(time.time())}"
+                order_result = {
+                    "clientOrderId": client_order_id,
+                    "symbol": symbol,
+                    "origQty": str(quantity),
+                    "executedQty": "0",
+                    "price": str(limit_p),
+                    "type": type,
+                    "side": side,
+                    "status": "NEW",
+                    "executedPercent": 0,
+                }
+                self._orders[client_order_id] = order_result
+                return {"success": True, "result": order_result}
+
+        else:  # MARKET
+            trade_price = market_price
+            sim_logger.info(f"🔎 Market Order fills at {trade_price:,.2f}")
+
+        # 2. Execute Trade (if filled)
+        return self._execute_trade(symbol, side, quantity, trade_price, type, client_id)
+
+    def _execute_trade(self, symbol, side, quantity, avg_price, type, client_id):
+        coin = symbol.replace("USDT", "")
+        trade_value_usdt = quantity * avg_price
+        fee_rate = Decimal("0.0035")
 
         sim_logger.info(
-            f"⚡ SIM TRADE ({type}): {side} {quantity} {coin} @ ${trade_price:,.2f} (Val: ${trade_value_usdt:,.2f})"
+            f"⚡ SIM TRADE EXECUTION: {side} {quantity} {coin} @ ${avg_price:,.2f} (Val: ${trade_value_usdt:,.2f})"
         )
 
         if side.upper() == "BUY":
-            # Buying Coin with USDT
             cost_usdt = trade_value_usdt
-
             if self.balances["USDT"] < cost_usdt:
-                msg = f"Insufficient USDT for trade. Have {self.balances['USDT']}, need {cost_usdt}"
-                sim_logger.error(msg)
-                raise Exception(msg)
+                sim_logger.error(
+                    f"Insufficient USDT. Have {self.balances['USDT']}, need {cost_usdt}"
+                )
+                # Technically should reject, but for sim maybe we allow partial or fail?
+                # Let's fail the execution but keep order if it was limit?
+                # For simplicity, if funds missing at execution time, we fail.
+                return {"success": False, "message": "Insufficient funds"}
 
-            # Update Balances
             self.balances["USDT"] -= cost_usdt
-            # Fee is taken from the bought asset
             received_coin = quantity * (Decimal("1") - fee_rate)
             self.balances[coin] = self.balances.get(coin, Decimal("0")) + received_coin
-
             self.save_state()
 
         elif side.upper() == "SELL":
-            # Selling Coin for USDT
             if self.balances.get(coin, Decimal("0")) < quantity:
-                msg = f"Insufficient {coin} for trade. Have {self.balances.get(coin, 0)}, need {quantity}"
-                sim_logger.error(msg)
-                raise Exception(msg)
+                sim_logger.error(
+                    f"Insufficient {coin}. Have {self.balances.get(coin, 0)}, need {quantity}"
+                )
+                return {"success": False, "message": "Insufficient funds"}
 
-            # Update Balances
             self.balances[coin] -= quantity
-            # Fee is taken from the received USDT
             received_usdt = trade_value_usdt * (Decimal("1") - fee_rate)
             self.balances["USDT"] += received_usdt
-
             self.save_state()
 
         client_order_id = client_id or f"SIM-{int(time.time())}"
@@ -194,20 +248,62 @@ class SimulationWallexAPI(main.WallexAPI):
             "symbol": symbol,
             "origQty": str(quantity),
             "executedQty": str(quantity),
-            "price": str(trade_price),
+            "price": str(avg_price),
             "type": type,
             "side": side,
             "status": "FILLED",
             "executedPercent": 100,
         }
         self._orders[client_order_id] = order_result
-
         return {"success": True, "result": order_result}
 
     def get_order(self, client_id: str) -> dict:
         order = self._orders.get(client_id)
         if not order:
             return {"success": False, "message": "Order not found"}
+
+        # Dynamic Check for NEW orders
+        if order.get("status") == "NEW":
+            symbol = order["symbol"]
+            side = order["side"]
+            limit_price = Decimal(order["price"])
+            quantity = Decimal(order["origQty"])
+
+            try:
+                # Poll Real Market
+                market_price = self.get_market_price(symbol)
+
+                should_fill = False
+                if side == "BUY" and limit_price >= market_price:
+                    should_fill = True
+                    sim_logger.info(
+                        f"✅ Pending BUY {symbol} fills! Limit {limit_price} >= Market {market_price}"
+                    )
+                elif side == "SELL" and limit_price <= market_price:
+                    should_fill = True
+                    sim_logger.info(
+                        f"✅ Pending SELL {symbol} fills! Limit {limit_price} <= Market {market_price}"
+                    )
+
+                if should_fill:
+                    # Execute
+                    # Use market price if better? Or limit price?
+                    # Maker orders fill at their limit price usually unless matched better.
+                    # Getting taker price (market price) is realistic if we crossed.
+                    # Just use Limit Price for simplicity of "Maker" simulation logic, or Market if better?
+                    # Let's use the Limit Price as the fill price to simulate "Limit Fill"
+                    # OR use Market Price to simulate "We became valid".
+                    # Wallex fills limit orders at the best price.
+                    # If I have a Buy Limit at 100, and market drops to 99. The fill is at 100 (if I was maker sitting there) or 99 (if I just arrived)?
+                    # If the order was sitting on the book (NEW), and market moved to it, it fills at the LIMIT price.
+                    exec_res = self._execute_trade(
+                        symbol, side, quantity, limit_price, order["type"], client_id
+                    )
+                    if exec_res["success"]:
+                        return exec_res
+            except Exception as e:
+                sim_logger.warning(f"Error checking pending order {client_id}: {e}")
+
         return {"success": True, "result": order}
 
     def cancel_order(self, client_id: str) -> dict:
@@ -277,7 +373,6 @@ def run_simulation():
     if token and chat_id:
         try:
             notifier = main.TelegramNotifier(token, chat_id)
-            notifier.send_message("🧪 <b>Simulation Started</b>\nTesting mode active.")
             sim_logger.info("✓ Telegram Notification Linked")
         except Exception as e:
             sim_logger.warning(f"⚠️ Failed to init Telegram: {e}")
