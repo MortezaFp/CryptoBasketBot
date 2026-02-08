@@ -99,8 +99,9 @@ class SimulationWallexAPI(main.WallexAPI):
             }
             with open(SIMULATION_STATE_FILE, "w") as f:
                 json.dump(data, f, indent=4)
+            sim_logger.info(f"💾 State saved to {SIMULATION_STATE_FILE}")
         except Exception as e:
-            sim_logger.error(f"Failed to save state: {e}")
+            sim_logger.error(f"❌ Failed to save state: {e}")
 
     def get_account_balances(self) -> dict:
         """Return simulated balances in the format expected by the bot"""
@@ -220,15 +221,16 @@ class SimulationWallexAPI(main.WallexAPI):
                 sim_logger.error(
                     f"Insufficient USDT. Have {self.balances['USDT']}, need {cost_usdt}"
                 )
-                # Technically should reject, but for sim maybe we allow partial or fail?
-                # Let's fail the execution but keep order if it was limit?
-                # For simplicity, if funds missing at execution time, we fail.
                 return {"success": False, "message": "Insufficient funds"}
 
             self.balances["USDT"] -= cost_usdt
             received_coin = quantity * (Decimal("1") - fee_rate)
             self.balances[coin] = self.balances.get(coin, Decimal("0")) + received_coin
-            self.save_state()
+
+            try:
+                self.save_state()
+            except Exception as e:
+                sim_logger.error(f"❌ Critical State Save Failure: {e}")
 
         elif side.upper() == "SELL":
             if self.balances.get(coin, Decimal("0")) < quantity:
@@ -240,7 +242,11 @@ class SimulationWallexAPI(main.WallexAPI):
             self.balances[coin] -= quantity
             received_usdt = trade_value_usdt * (Decimal("1") - fee_rate)
             self.balances["USDT"] += received_usdt
-            self.save_state()
+
+            try:
+                self.save_state()
+            except Exception as e:
+                sim_logger.error(f"❌ Critical State Save Failure: {e}")
 
         client_order_id = client_id or f"SIM-{int(time.time())}"
         order_result = {
