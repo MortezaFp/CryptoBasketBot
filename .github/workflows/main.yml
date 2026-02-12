@@ -2,7 +2,7 @@ name: Wallex Bot
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour
+    - cron: "0 * * * *" # every hour
   workflow_dispatch:
 
 jobs:
@@ -15,21 +15,18 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
 
-      - name: Restore sim state
+      - name: Restore & Save sim state
         uses: actions/cache@v4
         with:
           path: simulation_state.json
-          key: sim-state
-          restore-keys: sim-state
+          # Use run_id to ensure a unique key for saving
+          key: sim-state-${{ github.run_id }}
+          # Restore from the latest available cache
+          restore-keys: |
+            sim-state-
 
       - run: python main_test.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_ONCE: "true"
-
-      - name: Save sim state
-        uses: actions/cache@v4
-        with:
-          path: simulation_state.json
-          key: sim-state
