@@ -30,3 +30,26 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_ONCE: "true"
+
+  sim-aggressive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      - name: Restore & Save Aggressive sim state
+        uses: actions/cache@v4
+        with:
+          path: simulation_state_aggressive.json
+          key: sim-state-aggressive-${{ github.run_id }}
+          restore-keys: |
+            sim-state-aggressive-
+
+      - run: python main_test_aggressive.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_AGGRESSIVE }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_ONCE: "true"
