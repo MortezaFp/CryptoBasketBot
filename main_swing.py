@@ -305,6 +305,9 @@ def run_swing_cycle(api=None):
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
 
+        logger.info(f"Finished processing {coin}. Sleeping for 3 seconds to avoid rate limits...")
+        time.sleep(3)
+
     if notifier:
         msg = f"🔄 <b>Swing Bot Cycle Complete</b>\n"
         msg += f"🏦 Starting Bank: ${initial_bank:.2f}\n"
