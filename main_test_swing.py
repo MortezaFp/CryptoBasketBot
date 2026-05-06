@@ -6,12 +6,12 @@ import json
 from decimal import Decimal
 import main_swing
 import ctypes
-from main import get_app_path
+import main_swing as main  # Import the aggressive bot logic
 
 # Constants
 INITIAL_USDT = Decimal("1000")
-SIMULATION_LOG_FILE = os.path.join(get_app_path(), "simulation_log_swing.txt")
-SIMULATION_STATE_FILE = os.path.join(get_app_path(), "simulation_state_swing.json")
+SIMULATION_LOG_FILE = os.path.join(main.get_app_path(), "simulation_log_swing.txt")
+SIMULATION_STATE_FILE = os.path.join(main.get_app_path(), "simulation_state_swing.json")
 
 # Setup Simulation Logging
 file_handler = logging.FileHandler(SIMULATION_LOG_FILE, mode="a", encoding="utf-8")
@@ -22,10 +22,11 @@ root_logger.addHandler(file_handler)
 sim_logger = logging.getLogger("SwingSimulation")
 sim_logger.setLevel(logging.INFO)
 
+
 class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
     def __init__(self):
         super().__init__(api_key="SIMULATION_KEY")
-        
+
         loaded_state = self.load_state()
         if loaded_state:
             self.balances = loaded_state["balances"]
@@ -37,7 +38,7 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
             self.orders = []
             self.initial_value = INITIAL_USDT
             sim_logger.info("--- SIMULATION STARTED (FRESH) ---")
-            
+
     def load_state(self):
         if not os.path.exists(SIMULATION_STATE_FILE):
             return None
@@ -47,7 +48,7 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
             return {
                 "balances": {k: Decimal(str(v)) for k, v in data["balances"].items()},
                 "orders": data.get("orders", []),
-                "initial_value": Decimal(str(data.get("initial_value", "1000")))
+                "initial_value": Decimal(str(data.get("initial_value", "1000"))),
             }
         except Exception as e:
             sim_logger.error(f"Failed to load state: {e}")
@@ -58,7 +59,7 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
             data = {
                 "balances": {k: str(v) for k, v in self.balances.items()},
                 "orders": self.orders,
-                "initial_value": str(self.initial_value)
+                "initial_value": str(self.initial_value),
             }
             with open(SIMULATION_STATE_FILE, "w") as f:
                 json.dump(data, f, indent=4)
@@ -69,7 +70,15 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
         formatted = {k: {"value": str(v)} for k, v in self.balances.items()}
         return {"success": True, "result": {"balances": formatted}}
 
-    def create_order(self, symbol: str, side: str, quantity: Decimal, type: str = "MARKET", price: Decimal = None, client_id: str = None) -> dict:
+    def create_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        type: str = "MARKET",
+        price: Decimal = None,
+        client_id: str = None,
+    ) -> dict:
         try:
             market_price = self.get_market_price(symbol)
         except Exception as e:
@@ -86,7 +95,7 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
             self.balances["USDT"] -= trade_value_usdt
             received = Decimal(str(quantity)) * (Decimal("1") - fee_rate)
             self.balances[coin] = self.balances.get(coin, Decimal("0")) + received
-        else: # SELL
+        else:  # SELL
             if self.balances.get(coin, Decimal("0")) < Decimal(str(quantity)):
                 return {"success": False, "message": "Insufficient funds"}
             self.balances[coin] -= Decimal(str(quantity))
@@ -103,25 +112,32 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
             "origQty": str(quantity),
             "executedQty": str(quantity),
             "type": type,
-            "time": int(time.time() * 1000)
+            "time": int(time.time() * 1000),
         }
         self.orders.append(order_record)
         self.save_state()
-        
-        sim_logger.info(f"⚡ SIM TRADE EXECUTION: {side} {quantity} {coin} @ ${market_price:,.2f} (Val: ${trade_value_usdt:,.2f})")
+
+        sim_logger.info(
+            f"⚡ SIM TRADE EXECUTION: {side} {quantity} {coin} @ ${market_price:,.2f} (Val: ${trade_value_usdt:,.2f})"
+        )
         return {"success": True, "result": order_record}
 
     def get_last_filled_buy_order(self, symbol: str) -> dict:
-        filled_buys = [o for o in self.orders if o.get("market") == f"{symbol}USDT" and o.get("side") == "BUY"]
+        filled_buys = [
+            o
+            for o in self.orders
+            if o.get("market") == f"{symbol}USDT" and o.get("side") == "BUY"
+        ]
         if filled_buys:
             filled_buys.sort(key=lambda x: x.get("time", 0), reverse=True)
             return filled_buys[0]
         return None
 
+
 def run_simulation():
     print(f"Starting Swing Simulation Bot... Logging to {SIMULATION_LOG_FILE}")
     sim_api = SimulationSwingWallexAPI()
-    
+
     # Run standard logic via dependency injection
     main_swing.run_swing_cycle(api=sim_api)
 
@@ -132,7 +148,9 @@ def run_simulation():
     if market_data.get("success"):
         for m in market_data.get("result", {}).get("markets", []):
             try:
-                market_map[m["symbol"]] = Decimal(str(m.get("price", "0")).replace(",", ""))
+                market_map[m["symbol"]] = Decimal(
+                    str(m.get("price", "0")).replace(",", "")
+                )
             except:
                 pass
 
@@ -153,6 +171,7 @@ def run_simulation():
         f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api.balances.items() if v > 0} }\n"
     )
     sim_logger.info(log_msg)
+
 
 if __name__ == "__main__":
     if os.name == "nt":
