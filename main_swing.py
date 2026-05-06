@@ -22,6 +22,13 @@ BASE_TRADE_USDT = Decimal("50.0")
 MAX_BANK_ALLOCATION_PCT = Decimal("0.15")
 
 
+def get_app_path():
+    """Get the base path of the application, compatible with PyInstaller"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 class SwingWallexAPI(WallexAPI):
     def get_candle_history(self, symbol: str, start_ts: int, end_ts: int) -> list:
         try:
