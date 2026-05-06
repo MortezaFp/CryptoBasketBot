@@ -38,6 +38,7 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
             self.orders = []
             self.initial_value = INITIAL_USDT
             sim_logger.info("--- SIMULATION STARTED (FRESH) ---")
+            self.save_state()
 
     def load_state(self):
         if not os.path.exists(SIMULATION_STATE_FILE):
