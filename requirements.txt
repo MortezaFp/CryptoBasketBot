@@ -1,4 +1,4 @@
 requests>=2.31.0
 pandas>=2.0.0
-pandas-ta>=0.3.14b
+pandas-ta
 google-genai>=0.2.0
