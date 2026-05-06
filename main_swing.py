@@ -100,7 +100,6 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     Is this a confirmed high-probability swing trade entry, or a fake-out? 
     Respond ONLY with a valid JSON object containing: 'signal' (BUY, SELL, or HOLD), 'confidence_score' (1-100), and 'reason' (string).
 
-    CRITICAL INSTRUCTION: Use Google Search to check the last 24 hours of news for {coin}. If there is a catastrophic black swan event (hack, network halt, SEC lawsuit, major delisting), you MUST output 'HOLD' and a confidence of 0, overriding all technicals.
     """
     try:
         response = client.models.generate_content(
@@ -109,7 +108,6 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
             config={
                 "response_mime_type": "application/json",
                 "response_schema": AISignal,
-                "tools": [{"google_search": {}}],
             },
         )
         return json.loads(response.text)
@@ -305,7 +303,9 @@ def run_swing_cycle(api=None):
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
 
-        logger.info(f"Finished processing {coin}. Sleeping for 3 seconds to avoid rate limits...")
+        logger.info(
+            f"Finished processing {coin}. Sleeping for 3 seconds to avoid rate limits..."
+        )
         time.sleep(3)
 
     if notifier:
