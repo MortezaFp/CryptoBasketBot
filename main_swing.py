@@ -101,6 +101,7 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     Respond ONLY with a valid JSON object containing: 'signal' (BUY, SELL, or HOLD), 'confidence_score' (1-100), and 'reason' (string).
 
     """
+    logger.info(f"🧠 Sending Prompt to AI for {coin}:\n{prompt}")
     try:
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
@@ -110,6 +111,7 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
                 "response_schema": AISignal,
             },
         )
+        logger.info(f"🤖 AI Response for {coin}:\n{response.text}")
         return json.loads(response.text)
     except Exception as e:
         logger.error(f"Gemini API error: {e}")

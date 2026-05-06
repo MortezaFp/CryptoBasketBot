@@ -6,11 +6,12 @@ import json
 from decimal import Decimal
 import main_swing
 import ctypes
+from main import get_app_path
 
 # Constants
 INITIAL_USDT = Decimal("1000")
-SIMULATION_LOG_FILE = "simulation_log_swing.txt"
-SIMULATION_STATE_FILE = "simulation_state_swing.json"
+SIMULATION_LOG_FILE = os.path.join(get_app_path(), "simulation_log_swing.txt")
+SIMULATION_STATE_FILE = os.path.join(get_app_path(), "simulation_state_swing.json")
 
 # Setup Simulation Logging
 file_handler = logging.FileHandler(SIMULATION_LOG_FILE, mode="a", encoding="utf-8")
