@@ -104,7 +104,7 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     """
     try:
         response = client.models.generate_content(
-            model="gemini-3.0-flash",
+            model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config={
                 "response_mime_type": "application/json",
