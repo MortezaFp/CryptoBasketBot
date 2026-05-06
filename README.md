@@ -91,6 +91,18 @@ python main.py
 
 - **Safety**: `MIN_TRADE_USDT` is set to $1.0 to accommodate small portfolios.
 
+#### C. 🤖 AI Swing Trading Mode (Stateless Cron)
+
+A stateless, 15-minute cron-based swing trading strategy for 10 target coins. It uses a central USDT bank, technical indicators (SMA, EMA, RSI, Bollinger Bands, ATR), and AI validation via Google Gemini to make high-probability trades with strict risk management.
+
+**Configuration:**
+- Provide `GEMINI_API_KEY` in your environment or GitHub Secrets.
+- Run locally or deploy via the provided GitHub Action (`.github/workflows/swing.yml`).
+
+```bash
+python main_swing.py
+```
+
 ## ⚠️ Risk Verification
 
 - **Test First**: Always run the simulation for at least 24 hours before deploying real funds.

@@ -1,0 +1,41 @@
+name: AI Swing Trading Bot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sim-trade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore & Save sim swing state
+        uses: actions/cache@v4
+        with:
+          path: simulation_state_swing.json
+          key: sim-state-swing-${{ github.run_id }}
+          restore-keys: |
+            sim-state-swing-
+
+      - name: Run Swing Trading Script
+        env:
+          WALLEX_API_KEY: ${{ secrets.WALLEX_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_SWING }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RUN_ONCE: "true"
+        run: |
+          python main_test_swing.py
