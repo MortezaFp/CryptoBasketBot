@@ -182,10 +182,7 @@ def run_swing_cycle(api=None):
     summary_messages = []
 
     for coin in TARGET_COINS:
-        logger.info(
-            f"Processing {coin}... Sleeping for 5 seconds to avoid rate limits."
-        )
-        time.sleep(5)
+        logger.info(f"Processing {coin}...")
         coin_balance = balances.get(coin, Decimal("0"))
 
         try:
@@ -251,6 +248,10 @@ def run_swing_cycle(api=None):
                 and (last_row["close"] > last_row["sma_200"])
             )
             if math_check:
+                logger.info(
+                    f"Math conditions met for {coin}. Sleeping for 5 seconds before AI call to avoid rate limits."
+                )
+                time.sleep(5)
                 ai_resp = get_ai_signal(coin, indicators)
                 if ai_resp and ai_resp.get("signal") == "BUY":
                     conf = ai_resp.get("confidence_score", 0)
