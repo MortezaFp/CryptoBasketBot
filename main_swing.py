@@ -244,11 +244,11 @@ def run_swing_cycle(api=None):
 
         if state == "OUT":
             if last_row["ema_9"] <= last_row["ema_21"]:
-                reason = f"EMA9 ({last_row['ema_9']:.2f}) <= EMA21 ({last_row['ema_21']:.2f})"
+                reason = f"EMA9 ({last_row['ema_9']:.2f}) &lt;= EMA21 ({last_row['ema_21']:.2f})"
             elif last_row["rsi"] <= 50:
-                reason = f"RSI ({last_row['rsi']:.2f}) <= 50"
+                reason = f"RSI ({last_row['rsi']:.2f}) &lt;= 50"
             elif last_row["close"] <= last_row["sma_200"]:
-                reason = f"Price ({last_row['close']:.2f}) <= SMA200 ({last_row['sma_200']:.2f})"
+                reason = f"Price ({last_row['close']:.2f}) &lt;= SMA200 ({last_row['sma_200']:.2f})"
             else:
                 reason = None
 
@@ -266,7 +266,11 @@ def run_swing_cycle(api=None):
                 if ai_resp:
                     ai_sig = ai_resp.get("signal", "NONE")
                     ai_conf = ai_resp.get("confidence_score", 0)
-                    ai_reason = ai_resp.get("reason", "No reason provided")
+                    ai_reason = (
+                        str(ai_resp.get("reason", "No reason provided"))
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                    )
                     coin_reports.append(
                         f"🤖 <b>{coin}</b> @ ${current_price:.4f}: AI {ai_sig} ({ai_conf}%) | {ai_reason}"
                     )
