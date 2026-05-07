@@ -17,7 +17,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SwingBot")
 
-TARGET_COINS = ["BTC", "ETH", "SOL", "AVAX", "LINK", "SUI", "DOGE", "XRP", "ADA", "DOT"]
+TARGET_COINS = [
+    "BTC",
+    "ETH",
+    "SOL",
+    "AVAX",
+    "LINK",
+    "SUI",
+    "DOGE",
+    "XRP",
+    "ADA",
+    "DOT",
+    "TRX",
+    "SHIB",
+    "BCH",
+    "MATIC",
+    "LTC",
+    "NEAR",
+    "APT",
+    "UNI",
+    "ATOM",
+    "FIL",
+]
 BASE_TRADE_USDT = Decimal("50.0")
 MAX_BANK_ALLOCATION_PCT = Decimal("0.15")
 
@@ -161,7 +182,10 @@ def run_swing_cycle(api=None):
     summary_messages = []
 
     for coin in TARGET_COINS:
-        logger.info(f"Processing {coin}...")
+        logger.info(
+            f"Processing {coin}... Sleeping for 5 seconds to avoid rate limits."
+        )
+        time.sleep(5)
         coin_balance = balances.get(coin, Decimal("0"))
 
         try:
@@ -312,10 +336,7 @@ def run_swing_cycle(api=None):
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
 
-        logger.info(
-            f"Finished processing {coin}. Sleeping for 3 seconds to avoid rate limits..."
-        )
-        time.sleep(3)
+        logger.info(f"Finished processing {coin}.")
 
     if notifier:
         msg = f"🔄 <b>Swing Bot Cycle Complete</b>\n"
