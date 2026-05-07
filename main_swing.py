@@ -180,6 +180,7 @@ def run_swing_cycle(api=None):
     start_ts = end_ts - (250 * 60 * 60)
 
     summary_messages = []
+    coin_reports = []
 
     for coin in TARGET_COINS:
         logger.info(f"Processing {coin}...")
@@ -242,17 +243,38 @@ def run_swing_cycle(api=None):
         state = "IN" if coin_value_usdt >= Decimal("10.0") else "OUT"
 
         if state == "OUT":
-            math_check = (
-                (last_row["ema_9"] > last_row["ema_21"])
-                and (last_row["rsi"] > 50)
-                and (last_row["close"] > last_row["sma_200"])
-            )
-            if math_check:
+            if last_row["ema_9"] <= last_row["ema_21"]:
+                reason = f"EMA9 ({last_row['ema_9']:.2f}) <= EMA21 ({last_row['ema_21']:.2f})"
+            elif last_row["rsi"] <= 50:
+                reason = f"RSI ({last_row['rsi']:.2f}) <= 50"
+            elif last_row["close"] <= last_row["sma_200"]:
+                reason = f"Price ({last_row['close']:.2f}) <= SMA200 ({last_row['sma_200']:.2f})"
+            else:
+                reason = None
+
+            if reason:
+                coin_reports.append(
+                    f"➖ <b>{coin}</b> @ ${current_price:.4f}: Skipped | {reason}"
+                )
+            else:
                 logger.info(
                     f"Math conditions met for {coin}. Sleeping for 5 seconds before AI call to avoid rate limits."
                 )
                 time.sleep(5)
                 ai_resp = get_ai_signal(coin, indicators)
+
+                if ai_resp:
+                    ai_sig = ai_resp.get("signal", "NONE")
+                    ai_conf = ai_resp.get("confidence_score", 0)
+                    ai_reason = ai_resp.get("reason", "No reason provided")
+                    coin_reports.append(
+                        f"🤖 <b>{coin}</b> @ ${current_price:.4f}: AI {ai_sig} ({ai_conf}%) | {ai_reason}"
+                    )
+                else:
+                    coin_reports.append(
+                        f"⚠️ <b>{coin}</b> @ ${current_price:.4f}: Skipped | AI Request Failed"
+                    )
+
                 if ai_resp and ai_resp.get("signal") == "BUY":
                     conf = ai_resp.get("confidence_score", 0)
                     intended_size = Decimal("0")
@@ -334,8 +356,15 @@ def run_swing_cycle(api=None):
                     summary_messages.append(
                         f"❌ SELL {coin}: {qty} @ {current_price:.2f} (Entry: {entry_price:.2f})"
                     )
+                    coin_reports.append(
+                        f"❌ <b>{coin}</b> @ ${current_price:.4f}: SOLD | Entry: ${entry_price:.4f}"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
+            else:
+                coin_reports.append(
+                    f"💼 <b>{coin}</b> @ ${current_price:.4f}: Holding | No exit conditions met"
+                )
 
         logger.info(f"Finished processing {coin}.")
 
@@ -343,11 +372,20 @@ def run_swing_cycle(api=None):
         msg = f"🔄 <b>Swing Bot Cycle Complete</b>\n"
         msg += f"🏦 Starting Bank: ${initial_bank:.2f}\n"
         msg += f"🏦 Remaining Bank: ${current_bank:.2f}\n\n"
+
         if summary_messages:
-            msg += "<b>Executions:</b>\n" + "\n".join(summary_messages)
+            msg += "<b>Executions:</b>\n" + "\n".join(summary_messages) + "\n\n"
+
+        msg += "<b>Coin Reports:</b>\n" + "\n".join(coin_reports)
+
+        # Split message if it's too long for Telegram (max 4096 chars)
+        if len(msg) > 4000:
+            parts = [msg[i : i + 4000] for i in range(0, len(msg), 4000)]
+            for part in parts:
+                notifier.send_message(part)
         else:
-            msg += "<i>No trades executed this cycle.</i>"
-        notifier.send_message(msg)
+            notifier.send_message(msg)
+
         notifier.flush()
 
 
