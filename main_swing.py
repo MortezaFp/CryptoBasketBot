@@ -130,20 +130,31 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
 
     """
     logger.info(f"🧠 Sending Prompt to AI for {coin}:\n{prompt}")
-    try:
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": AISignal,
-            },
-        )
-        logger.info(f"🤖 AI Response for {coin}:\n{response.text}")
-        return json.loads(response.text)
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        return None
+
+    models_to_try = ["gemini-flash-latest", "gemini-2.5-flash"]
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": AISignal,
+                    },
+                )
+                logger.info(
+                    f"🤖 AI Response for {coin} using {model_name}:\n{response.text}"
+                )
+                return json.loads(response.text)
+            except Exception as e:
+                logger.error(
+                    f"Gemini API error with {model_name} (Attempt {attempt + 1}/2): {e}"
+                )
+                time.sleep(2)
+
+    logger.error(f"All Gemini AI requests failed for {coin}. Skipping.")
+    return None
 
 
 def run_swing_cycle(api=None):
