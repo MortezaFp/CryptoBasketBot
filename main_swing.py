@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import json
+import requests
 from decimal import Decimal, ROUND_DOWN
 import pandas as pd
 import pandas_ta as ta
@@ -100,6 +101,38 @@ class AISignal(BaseModel):
     signal: str
     confidence_score: int
     reason: str
+
+
+def check_global_veto(coin: str, local_change_pct: float) -> bool:
+    try:
+        binance_url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={coin}USDT"
+        resp = requests.get(binance_url, timeout=5)
+        # If the coin doesn't exist on Binance (like SLVON or XAUT), don't veto.
+        if resp.status_code == 400:
+            return False
+
+        resp.raise_for_status()
+        data = resp.json()
+        global_change_pct = float(data.get("priceChangePercent", 0.0))
+
+        # 2A. Global Crash
+        if global_change_pct < -3.0:
+            logger.warning(
+                f"VETO 🚨: {coin} Binance 24h drop is {global_change_pct:.2f}% (< -3%)"
+            )
+            return True
+
+        # 2B. Divergence (Lag)
+        if (local_change_pct - global_change_pct) > 1.5:
+            logger.warning(
+                f"VETO 🚨: {coin} Divergence! Local ({local_change_pct:.2f}%) minus Global ({global_change_pct:.2f}%) > 1.5%"
+            )
+            return True
+
+        return False
+    except Exception as e:
+        logger.debug(f"Global Veto check failed or skipped for {coin}: {e}")
+        return False
 
 
 def get_ai_signal(coin: str, indicators: dict) -> dict:
@@ -214,6 +247,21 @@ def run_swing_cycle(api=None):
     summary_messages = []
     coin_reports = []
 
+    # Fetch Wallex markets to get local 24h change percent for the Veto check
+    local_changes = {}
+    try:
+        w_markets_resp = requests.get(
+            "https://api.wallex.ir/hector/web/v1/markets", timeout=10
+        ).json()
+        w_markets = w_markets_resp.get("result", {}).get("markets", [])
+        for m in w_markets:
+            if m.get("quote_asset") == "USDT":
+                local_changes[m.get("base_asset")] = float(
+                    m.get("change_24h", 0.0) or 0.0
+                )
+    except Exception as e:
+        logger.error(f"Failed to fetch Wallex markets for local changes: {e}")
+
     for coin in TARGET_COINS:
         logger.info(f"Processing {coin}...")
         coin_balance = balances.get(coin, Decimal("0"))
@@ -272,10 +320,15 @@ def run_swing_cycle(api=None):
             "atr": float(last_row["atr"]),
         }
 
+        local_change_pct = local_changes.get(coin, 0.0)
+        is_vetoed = check_global_veto(coin, local_change_pct)
+
         state = "IN" if coin_value_usdt >= Decimal("10.0") else "OUT"
 
         if state == "OUT":
-            if last_row["ema_9"] <= last_row["ema_21"]:
+            if is_vetoed:
+                reason = "Global Veto Triggered (Binance Crash/Lag)"
+            elif last_row["ema_9"] <= last_row["ema_21"]:
                 reason = f"EMA9 ({last_row['ema_9']:.2f}) &lt;= EMA21 ({last_row['ema_21']:.2f})"
             elif last_row["rsi"] <= 50:
                 reason = f"RSI ({last_row['rsi']:.2f}) &lt;= 50"
@@ -370,14 +423,18 @@ def run_swing_cycle(api=None):
             take_profit = entry_price * Decimal("1.08")
 
             sell_condition = (
-                (current_price <= dynamic_stop_loss)
+                is_vetoed
+                or (current_price <= dynamic_stop_loss)
                 or (current_price >= take_profit)
                 or (last_row["ema_9"] < last_row["ema_21"])
             )
 
             if sell_condition:
+                reason_str = (
+                    "Global Veto (Emergency!)" if is_vetoed else "Condition met"
+                )
                 logger.info(
-                    f"Executing SELL for {coin}. Condition met. Price: {current_price}, Stop: {dynamic_stop_loss}, TP: {take_profit}"
+                    f"Executing SELL for {coin}. {reason_str}. Price: {current_price}, Stop: {dynamic_stop_loss}, TP: {take_profit}"
                 )
                 try:
                     precision = api.get_market_precision(f"{coin}USDT")
@@ -389,11 +446,12 @@ def run_swing_cycle(api=None):
                     )
 
                     api.create_order(f"{coin}USDT", "SELL", qty, type="MARKET")
+                    sell_type = "EMERGENCY VETO SELL" if is_vetoed else "SELL"
                     summary_messages.append(
-                        f"❌ SELL {coin}: {qty} @ {current_price:.10f} (Entry: {entry_price:.10f})"
+                        f"❌ {sell_type} {coin}: {qty} @ {current_price:.10f} (Entry: {entry_price:.10f})"
                     )
                     coin_reports.append(
-                        f"❌ <b>{coin}</b> @ ${current_price:.10f}: SOLD | Entry: ${entry_price:.10f}"
+                        f"❌ <b>{coin}</b> @ ${current_price:.10f}: SOLD ({sell_type}) | Entry: ${entry_price:.10f}"
                     )
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
