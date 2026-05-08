@@ -23,10 +23,13 @@ jobs:
       - name: Restore & Save sim swing state
         uses: actions/cache@v4
         with:
-          path: simulation_state_swing.json
-          key: sim-state-swing-${{ github.run_id }}
+          path: |
+            simulation_state_swing.json
+            simulation_state_swing_strct80.json
+            simulation_state_swing_spec70.json
+          key: sim-state-swing-v2-${{ github.run_id }}
           restore-keys: |
-            sim-state-swing-
+            sim-state-swing-v2-
 
       - name: Run Swing Trading Script
         env:
