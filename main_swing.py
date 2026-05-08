@@ -20,24 +20,19 @@ logger = logging.getLogger("SwingBot")
 TARGET_COINS = [
     "BTC",
     "ETH",
-    "SOL",
-    "AVAX",
-    "LINK",
-    "SUI",
-    "DOGE",
-    "XRP",
-    "ADA",
-    "DOT",
-    "TRX",
     "TON",
-    "BCH",
-    "POL",
-    "LTC",
-    "NEAR",
-    "APT",
-    "UNI",
-    "ATOM",
-    "FIL",
+    "XAUT",
+    "DOGE",
+    "SLVON",
+    "SOL",
+    "PEPE",
+    "DOGS",
+    "XRP",
+    "NOT",
+    "ADA",
+    "DASH",
+    "TRX",
+    "ARB",
 ]
 BASE_TRADE_USDT = Decimal("50.0")
 MAX_BANK_ALLOCATION_PCT = Decimal("0.15")
@@ -187,6 +182,32 @@ def run_swing_cycle(api=None):
 
     logger.info(f"Starting Bank: {current_bank} USDT")
 
+    # Clean up deprecated coins
+    for b_coin, amt in balances.items():
+        if b_coin == "USDT" or b_coin in TARGET_COINS:
+            continue
+        if amt > 0:
+            try:
+                c_price = api.get_market_price(f"{b_coin}USDT")
+                b_value = amt * c_price
+                if b_value >= Decimal("5.0"):
+                    logger.info(
+                        f"Liquidating removed coin {b_coin} (Value: ~${b_value:.2f})"
+                    )
+                    precision = api.get_market_precision(f"{b_coin}USDT")
+                    precision_str = (
+                        "0." + "0" * (precision - 1) + "1" if precision > 0 else "1"
+                    )
+                    qty = amt.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
+                    api.create_order(f"{b_coin}USDT", "SELL", qty, type="MARKET")
+                    current_bank += (
+                        b_value  # Roughly update bank based on estimated value
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to check/liquidate deprecated coin {b_coin}: {e}"
+                )
+
     end_ts = int(time.time())
     start_ts = end_ts - (250 * 60 * 60)
 
@@ -265,7 +286,7 @@ def run_swing_cycle(api=None):
 
             if reason:
                 coin_reports.append(
-                    f"➖ <b>{coin}</b> @ ${current_price:.4f}: Skipped | {reason}"
+                    f"➖ <b>{coin}</b> @ ${current_price:.10f}: Skipped | {reason}"
                 )
             else:
                 logger.info(
@@ -283,11 +304,11 @@ def run_swing_cycle(api=None):
                         .replace(">", "&gt;")
                     )
                     coin_reports.append(
-                        f"🤖 <b>{coin}</b> @ ${current_price:.4f}: AI {ai_sig} ({ai_conf}%) | {ai_reason}"
+                        f"🤖 <b>{coin}</b> @ ${current_price:.10f}: AI {ai_sig} ({ai_conf}%) | {ai_reason}"
                     )
                 else:
                     coin_reports.append(
-                        f"⚠️ <b>{coin}</b> @ ${current_price:.4f}: Skipped | AI Request Failed"
+                        f"⚠️ <b>{coin}</b> @ ${current_price:.10f}: Skipped | AI Request Failed"
                     )
 
                 if ai_resp and ai_resp.get("signal") == "BUY":
@@ -326,7 +347,7 @@ def run_swing_cycle(api=None):
                                 )
                                 current_bank -= actual_trade_size
                                 summary_messages.append(
-                                    f"✅ BUY {coin}: ${actual_trade_size:.2f} @ {current_price:.2f} (AI Conf: {conf}) - {ai_resp.get('reason')}"
+                                    f"✅ BUY {coin}: ${actual_trade_size:.2f} @ {current_price:.10f} (AI Conf: {conf}) - {ai_resp.get('reason')}"
                                 )
                             except Exception as e:
                                 logger.error(f"Failed to buy {coin}: {e}")
@@ -369,16 +390,16 @@ def run_swing_cycle(api=None):
 
                     api.create_order(f"{coin}USDT", "SELL", qty, type="MARKET")
                     summary_messages.append(
-                        f"❌ SELL {coin}: {qty} @ {current_price:.2f} (Entry: {entry_price:.2f})"
+                        f"❌ SELL {coin}: {qty} @ {current_price:.10f} (Entry: {entry_price:.10f})"
                     )
                     coin_reports.append(
-                        f"❌ <b>{coin}</b> @ ${current_price:.4f}: SOLD | Entry: ${entry_price:.4f}"
+                        f"❌ <b>{coin}</b> @ ${current_price:.10f}: SOLD | Entry: ${entry_price:.10f}"
                     )
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
             else:
                 coin_reports.append(
-                    f"💼 <b>{coin}</b> @ ${current_price:.4f}: Holding | No exit conditions met"
+                    f"💼 <b>{coin}</b> @ ${current_price:.10f}: Holding | No exit conditions met"
                 )
 
         logger.info(f"Finished processing {coin}.")
