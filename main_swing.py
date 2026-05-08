@@ -372,10 +372,19 @@ def run_swing_cycle(api=None):
                 if ai_resp and ai_resp.get("signal") == "BUY":
                     conf = ai_resp.get("confidence_score", 0)
                     intended_size = Decimal("0")
-                    if 80 <= conf <= 89:
-                        intended_size = BASE_TRADE_USDT
-                    elif conf >= 90:
-                        intended_size = BASE_TRADE_USDT * Decimal("1.5")
+
+                    if conf >= 90:
+                        intended_size = BASE_TRADE_USDT * Decimal(
+                            "1.5"
+                        )  # 150% Aggressive
+                    elif conf >= 80:
+                        intended_size = BASE_TRADE_USDT  # 100% Standard
+                    elif conf >= 70:
+                        intended_size = BASE_TRADE_USDT * Decimal(
+                            "0.5"
+                        )  # 50% Speculative
+                    else:
+                        intended_size = Decimal("0")  # Neutral (< 70)
 
                     if intended_size > 0:
                         actual_trade_size = min(
