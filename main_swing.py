@@ -190,7 +190,7 @@ def fmt_price(p) -> str:
     return f"{float(p):.10f}".rstrip("0").rstrip(".")
 
 
-def run_swing_cycle(api=None):
+def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     if api is None:
         api_key = os.environ.get("WALLEX_API_KEY")
         if not api_key:
@@ -374,17 +374,13 @@ def run_swing_cycle(api=None):
                     intended_size = Decimal("0")
 
                     if conf >= 90:
-                        intended_size = BASE_TRADE_USDT * Decimal(
-                            "1.5"
-                        )  # 150% Aggressive
+                        intended_size = BASE_TRADE_USDT * Decimal("1.5")
                     elif conf >= 80:
-                        intended_size = BASE_TRADE_USDT  # 100% Standard
-                    elif conf >= 70:
-                        intended_size = BASE_TRADE_USDT * Decimal(
-                            "0.5"
-                        )  # 50% Speculative
+                        intended_size = BASE_TRADE_USDT
+                    elif conf >= 70 and allow_speculative:
+                        intended_size = BASE_TRADE_USDT * Decimal("0.5")
                     else:
-                        intended_size = Decimal("0")  # Neutral (< 70)
+                        intended_size = Decimal("0")
 
                     if intended_size > 0:
                         actual_trade_size = min(
@@ -410,7 +406,11 @@ def run_swing_cycle(api=None):
                                 )
 
                                 api.create_order(
-                                    f"{coin}USDT", "BUY", qty, type="MARKET"
+                                    f"{coin}USDT",
+                                    "BUY",
+                                    qty,
+                                    type="MARKET",
+                                    client_id=f"conf_{conf}",
                                 )
                                 current_bank -= actual_trade_size
                                 summary_messages.append(
@@ -431,6 +431,12 @@ def run_swing_cycle(api=None):
             if entry_price == 0:
                 logger.warning(f"Entry price is 0 for {coin}. Skipping.")
                 continue
+
+            # Extract confidence from clientOrderId if possible
+            client_id = last_order.get("clientOrderId", "")
+            entry_conf = (
+                client_id.split("_")[1] if client_id and "conf_" in client_id else "??"
+            )
 
             current_atr = Decimal(str(last_row["atr"]))
             dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
@@ -462,22 +468,23 @@ def run_swing_cycle(api=None):
                     api.create_order(f"{coin}USDT", "SELL", qty, type="MARKET")
                     sell_type = "EMERGENCY VETO SELL" if is_vetoed else "SELL"
                     summary_messages.append(
-                        f"❌ {sell_type} {coin}: {qty} @ {fmt_price(current_price)} (Entry: {fmt_price(entry_price)})"
+                        f"❌ {sell_type} {coin}: {qty} @ {fmt_price(current_price)} (Entry: {fmt_price(entry_price)} | Conf: {entry_conf})"
                     )
                     coin_reports.append(
-                        f"❌ <b>{coin}</b> @ ${fmt_price(current_price)}: SOLD ({sell_type}) | Entry: ${fmt_price(entry_price)}"
+                        f"❌ <b>{coin}</b> @ ${fmt_price(current_price)}: SOLD ({sell_type}) | Entry: ${fmt_price(entry_price)} (Conf: {entry_conf})"
                     )
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
             else:
                 coin_reports.append(
-                    f"💼 <b>{coin}</b> @ ${fmt_price(current_price)}: Holding | No exit conditions met"
+                    f"💼 <b>{coin}</b> @ ${fmt_price(current_price)}: Holding | Entry: ${fmt_price(entry_price)} (Conf: {entry_conf})"
                 )
 
         logger.info(f"Finished processing {coin}.")
 
     if notifier:
-        msg = f"🔄 <b>Swing Bot Cycle Complete</b>\n"
+        header_name = cycle_name or "Swing Bot"
+        msg = f"🔄 <b>{header_name} Cycle Complete</b>\n"
         msg += f"🏦 Starting Bank: ${initial_bank:.2f}\n"
         msg += f"🏦 Remaining Bank: ${current_bank:.2f}\n\n"
 

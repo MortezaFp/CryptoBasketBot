@@ -24,27 +24,32 @@ sim_logger.setLevel(logging.INFO)
 
 
 class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
-    def __init__(self):
+    def __init__(self, state_file=SIMULATION_STATE_FILE):
         super().__init__(api_key="SIMULATION_KEY")
+        self.state_file = state_file
 
         loaded_state = self.load_state()
         if loaded_state:
             self.balances = loaded_state["balances"]
             self.orders = loaded_state["orders"]
             self.initial_value = loaded_state["initial_value"]
-            sim_logger.info("--- SIMULATION RESUMED ---")
+            sim_logger.info(
+                f"--- SIMULATION RESUMED ({os.path.basename(state_file)}) ---"
+            )
         else:
             self.balances = {"USDT": INITIAL_USDT}
             self.orders = []
             self.initial_value = INITIAL_USDT
-            sim_logger.info("--- SIMULATION STARTED (FRESH) ---")
+            sim_logger.info(
+                f"--- SIMULATION STARTED (FRESH: {os.path.basename(state_file)}) ---"
+            )
             self.save_state()
 
     def load_state(self):
-        if not os.path.exists(SIMULATION_STATE_FILE):
+        if not os.path.exists(self.state_file):
             return None
         try:
-            with open(SIMULATION_STATE_FILE, "r") as f:
+            with open(self.state_file, "r") as f:
                 data = json.load(f)
             return {
                 "balances": {k: Decimal(str(v)) for k, v in data["balances"].items()},
@@ -62,7 +67,7 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
                 "orders": self.orders,
                 "initial_value": str(self.initial_value),
             }
-            with open(SIMULATION_STATE_FILE, "w") as f:
+            with open(self.state_file, "w") as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
             sim_logger.error(f"Failed to save state: {e}")
@@ -137,15 +142,50 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
 
 def run_simulation():
     print(f"Starting Swing Simulation Bot... Logging to {SIMULATION_LOG_FILE}")
-    sim_api = SimulationSwingWallexAPI()
 
-    # Run standard logic via dependency injection
-    main_swing.run_swing_cycle(api=sim_api)
+    # --- AI CACHING SYSTEM TO SAVE API CREDITS & TIME ---
+    # We monkey-patch the AI signal function so that the second simulation
+    # run instantly re-uses the exact same AI evaluations as the first run!
+    original_get_ai_signal = main_swing.get_ai_signal
+    ai_cache = {}
 
-    # Print Profit Report
-    total_value = sim_api.balances.get("USDT", Decimal("0"))
+    def cached_get_ai_signal(coin: str, indicators: dict) -> dict:
+        if coin in ai_cache:
+            sim_logger.info(f"⚡ [CACHE HIT] Reusing cached AI response for {coin}")
+            return ai_cache[coin]
+
+        result = original_get_ai_signal(coin, indicators)
+        ai_cache[coin] = result
+        return result
+
+    # Override the live function with our cached version for this test execution
+    main_swing.get_ai_signal = cached_get_ai_signal
+    # ----------------------------------------------------
+
+    sim_logger.info("\n=== RUNNING STRICT 80+ CONFIDENCE TEST ===")
+    state_file_80 = os.path.join(
+        main.get_app_path(), "simulation_state_swing_strct80.json"
+    )
+    sim_api_80 = SimulationSwingWallexAPI(state_file=state_file_80)
+    main_swing.run_swing_cycle(
+        api=sim_api_80, allow_speculative=False, cycle_name="SIMULATION - STRICT (80+)"
+    )
+
+    sim_logger.info("\n=== RUNNING SPECULATIVE 70+ CONFIDENCE TEST ===")
+    state_file_70 = os.path.join(
+        main.get_app_path(), "simulation_state_swing_spec70.json"
+    )
+    sim_api_70 = SimulationSwingWallexAPI(state_file=state_file_70)
+    main_swing.run_swing_cycle(
+        api=sim_api_70,
+        allow_speculative=True,
+        cycle_name="SIMULATION - SPECULATIVE (70+)",
+    )
+
+    # Print Profit Report for Strict Bank
+    total_value_80 = sim_api_80.balances.get("USDT", Decimal("0"))
     market_map = {}
-    market_data = sim_api.get_all_markets()
+    market_data = sim_api_80.get_all_markets()
     if market_data.get("success"):
         for m in market_data.get("result", {}).get("markets", []):
             try:
@@ -155,23 +195,43 @@ def run_simulation():
             except:
                 pass
 
-    for coin, amt in sim_api.balances.items():
+    for coin, amt in sim_api_80.balances.items():
         if coin != "USDT" and amt > 0:
             pair = f"{coin}USDT"
             if pair in market_map:
-                total_value += amt * market_map[pair]
+                total_value_80 += amt * market_map[pair]
 
-    profit = total_value - sim_api.initial_value
-    profit_pct = (profit / sim_api.initial_value) * 100
+    profit_80 = total_value_80 - sim_api_80.initial_value
+    profit_pct_80 = (profit_80 / sim_api_80.initial_value) * 100
 
-    log_msg = (
-        f"\n📊 SWING SIMULATION STATS:\n"
-        f"   Initial Value: ${sim_api.initial_value:,.2f}\n"
-        f"   Current Value: ${total_value:,.2f}\n"
-        f"   P/L: ${profit:,.2f} ({profit_pct:+.2f}%)\n"
-        f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api.balances.items() if v > 0} }\n"
+    log_msg_80 = (
+        f"\n📊 SWING SIMULATION STATS (STRICT 80+):\n"
+        f"   Initial Value: ${sim_api_80.initial_value:,.2f}\n"
+        f"   Current Value: ${total_value_80:,.2f}\n"
+        f"   P/L: ${profit_80:,.2f} ({profit_pct_80:+.2f}%)\n"
+        f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api_80.balances.items() if v > 0} }\n"
     )
-    sim_logger.info(log_msg)
+    sim_logger.info(log_msg_80)
+
+    # Print Profit Report for Spec Bank
+    total_value_70 = sim_api_70.balances.get("USDT", Decimal("0"))
+    for coin, amt in sim_api_70.balances.items():
+        if coin != "USDT" and amt > 0:
+            pair = f"{coin}USDT"
+            if pair in market_map:
+                total_value_70 += amt * market_map[pair]
+
+    profit_70 = total_value_70 - sim_api_70.initial_value
+    profit_pct_70 = (profit_70 / sim_api_70.initial_value) * 100
+
+    log_msg_70 = (
+        f"\n📊 SWING SIMULATION STATS (SPECULATIVE 70+):\n"
+        f"   Initial Value: ${sim_api_70.initial_value:,.2f}\n"
+        f"   Current Value: ${total_value_70:,.2f}\n"
+        f"   P/L: ${profit_70:,.2f} ({profit_pct_70:+.2f}%)\n"
+        f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api_70.balances.items() if v > 0} }\n"
+    )
+    sim_logger.info(log_msg_70)
 
 
 if __name__ == "__main__":
