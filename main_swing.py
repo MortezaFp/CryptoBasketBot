@@ -159,7 +159,12 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     """
     logger.info(f"🧠 Sending Prompt to AI for {coin}:\n{prompt}")
 
-    models_to_try = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+    models_to_try = [
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
+        "gemini-2.5-flash",
+        "gemma-4-31b-it",
+    ]
     for model_name in models_to_try:
         for attempt in range(2):
             try:
@@ -449,7 +454,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             )
 
             current_atr = Decimal(str(last_row["atr"]))
-            
+
             # Initial Stop Loss
             dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
 
@@ -457,7 +462,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             order_time = int(last_order.get("time", 0))
             if order_time > 2000000000:
                 order_time = order_time // 1000
-            
+
             df_since_buy = df[df["time"] >= order_time]
             if not df_since_buy.empty:
                 highest_price = Decimal(str(df_since_buy["high"].max()))
