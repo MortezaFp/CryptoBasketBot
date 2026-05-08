@@ -143,6 +143,13 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
 def run_simulation():
     print(f"Starting Swing Simulation Bot... Logging to {SIMULATION_LOG_FILE}")
 
+    telegram_token, chat_id = main.load_telegram_config()
+    notifier = (
+        main.TelegramNotifier(telegram_token, chat_id)
+        if telegram_token and chat_id
+        else None
+    )
+
     # --- AI CACHING SYSTEM TO SAVE API CREDITS & TIME ---
     # We monkey-patch the AI signal function so that the second simulation
     # run instantly re-uses the exact same AI evaluations as the first run!
@@ -212,6 +219,15 @@ def run_simulation():
         f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api_80.balances.items() if v > 0} }\n"
     )
     sim_logger.info(log_msg_80)
+    if notifier:
+        tg_msg = (
+            f"📊 <b>SWING SIMULATION STATS (STRICT 80+)</b>\n"
+            f"🏦 Initial Value: ${sim_api_80.initial_value:,.2f}\n"
+            f"💰 Current Value: ${total_value_80:,.2f}\n"
+            f"📈 P/L: ${profit_80:,.2f} ({profit_pct_80:+.2f}%)\n"
+            f"🎒 Holdings: { {k: f'{v:.4f}' for k, v in sim_api_80.balances.items() if v > 0} }"
+        )
+        notifier.send_message(tg_msg)
 
     # Print Profit Report for Spec Bank
     total_value_70 = sim_api_70.balances.get("USDT", Decimal("0"))
@@ -232,6 +248,16 @@ def run_simulation():
         f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api_70.balances.items() if v > 0} }\n"
     )
     sim_logger.info(log_msg_70)
+    if notifier:
+        tg_msg = (
+            f"📊 <b>SWING SIMULATION STATS (SPECULATIVE 70+)</b>\n"
+            f"🏦 Initial Value: ${sim_api_70.initial_value:,.2f}\n"
+            f"💰 Current Value: ${total_value_70:,.2f}\n"
+            f"📈 P/L: ${profit_70:,.2f} ({profit_pct_70:+.2f}%)\n"
+            f"🎒 Holdings: { {k: f'{v:.4f}' for k, v in sim_api_70.balances.items() if v > 0} }"
+        )
+        notifier.send_message(tg_msg)
+        notifier.flush()
 
 
 if __name__ == "__main__":
