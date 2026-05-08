@@ -185,6 +185,11 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     return None
 
 
+def fmt_price(p) -> str:
+    """Formats price to max 10 decimals, removing trailing zeros."""
+    return f"{float(p):.10f}".rstrip("0").rstrip(".")
+
+
 def run_swing_cycle(api=None):
     if api is None:
         api_key = os.environ.get("WALLEX_API_KEY")
@@ -339,7 +344,7 @@ def run_swing_cycle(api=None):
 
             if reason:
                 coin_reports.append(
-                    f"➖ <b>{coin}</b> @ ${current_price:.10f}: Skipped | {reason}"
+                    f"➖ <b>{coin}</b> @ ${fmt_price(current_price)}: Skipped | {reason}"
                 )
             else:
                 logger.info(
@@ -357,11 +362,11 @@ def run_swing_cycle(api=None):
                         .replace(">", "&gt;")
                     )
                     coin_reports.append(
-                        f"🤖 <b>{coin}</b> @ ${current_price:.10f}: AI {ai_sig} ({ai_conf}%) | {ai_reason}"
+                        f"🤖 <b>{coin}</b> @ ${fmt_price(current_price)}: AI {ai_sig} ({ai_conf}%) | {ai_reason}"
                     )
                 else:
                     coin_reports.append(
-                        f"⚠️ <b>{coin}</b> @ ${current_price:.10f}: Skipped | AI Request Failed"
+                        f"⚠️ <b>{coin}</b> @ ${fmt_price(current_price)}: Skipped | AI Request Failed"
                     )
 
                 if ai_resp and ai_resp.get("signal") == "BUY":
@@ -400,7 +405,7 @@ def run_swing_cycle(api=None):
                                 )
                                 current_bank -= actual_trade_size
                                 summary_messages.append(
-                                    f"✅ BUY {coin}: ${actual_trade_size:.2f} @ {current_price:.10f} (AI Conf: {conf}) - {ai_resp.get('reason')}"
+                                    f"✅ BUY {coin}: ${actual_trade_size:.2f} @ {fmt_price(current_price)} (AI Conf: {conf}) - {ai_resp.get('reason')}"
                                 )
                             except Exception as e:
                                 logger.error(f"Failed to buy {coin}: {e}")
@@ -448,16 +453,16 @@ def run_swing_cycle(api=None):
                     api.create_order(f"{coin}USDT", "SELL", qty, type="MARKET")
                     sell_type = "EMERGENCY VETO SELL" if is_vetoed else "SELL"
                     summary_messages.append(
-                        f"❌ {sell_type} {coin}: {qty} @ {current_price:.10f} (Entry: {entry_price:.10f})"
+                        f"❌ {sell_type} {coin}: {qty} @ {fmt_price(current_price)} (Entry: {fmt_price(entry_price)})"
                     )
                     coin_reports.append(
-                        f"❌ <b>{coin}</b> @ ${current_price:.10f}: SOLD ({sell_type}) | Entry: ${entry_price:.10f}"
+                        f"❌ <b>{coin}</b> @ ${fmt_price(current_price)}: SOLD ({sell_type}) | Entry: ${fmt_price(entry_price)}"
                     )
                 except Exception as e:
                     logger.error(f"Failed to sell {coin}: {e}")
             else:
                 coin_reports.append(
-                    f"💼 <b>{coin}</b> @ ${current_price:.10f}: Holding | No exit conditions met"
+                    f"💼 <b>{coin}</b> @ ${fmt_price(current_price)}: Holding | No exit conditions met"
                 )
 
         logger.info(f"Finished processing {coin}.")
