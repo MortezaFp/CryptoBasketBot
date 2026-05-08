@@ -159,7 +159,7 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     """
     logger.info(f"🧠 Sending Prompt to AI for {coin}:\n{prompt}")
 
-    models_to_try = ["gemini-flash-latest", "gemini-2.5-flash"]
+    models_to_try = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
     for model_name in models_to_try:
         for attempt in range(2):
             try:
