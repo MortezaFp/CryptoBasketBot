@@ -279,7 +279,17 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
         coin_value_usdt = coin_balance * current_price
 
-        candles = api.get_candle_history(coin, start_ts, end_ts)
+        coin_start_ts = start_ts
+        if coin_value_usdt >= Decimal("10.0"):
+            last_order = api.get_last_filled_buy_order(coin)
+            if last_order:
+                order_time = int(last_order.get("time", 0))
+                if order_time > 2000000000:
+                    order_time = order_time // 1000
+                if order_time > 0 and order_time < coin_start_ts:
+                    coin_start_ts = order_time
+
+        candles = api.get_candle_history(coin, coin_start_ts, end_ts)
         if len(candles) < 200:
             logger.warning(f"Not enough candles for {coin}. Skipping.")
             continue
@@ -439,13 +449,30 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             )
 
             current_atr = Decimal(str(last_row["atr"]))
+            
+            # Initial Stop Loss
             dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
-            take_profit = entry_price * Decimal("1.08")
+
+            # Determine the highest price since the buy order
+            order_time = int(last_order.get("time", 0))
+            if order_time > 2000000000:
+                order_time = order_time // 1000
+            
+            df_since_buy = df[df["time"] >= order_time]
+            if not df_since_buy.empty:
+                highest_price = Decimal(str(df_since_buy["high"].max()))
+            else:
+                highest_price = current_price
+            highest_price = max(highest_price, current_price)
+
+            # Trailing Profit Logic
+            if highest_price >= entry_price * Decimal("1.08"):
+                new_stop = highest_price - (Decimal("1.0") * current_atr)
+                dynamic_stop_loss = max(dynamic_stop_loss, new_stop)
 
             sell_condition = (
                 is_vetoed
                 or (current_price <= dynamic_stop_loss)
-                or (current_price >= take_profit)
                 or (last_row["ema_9"] < last_row["ema_21"])
             )
 
@@ -454,7 +481,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                     "Global Veto (Emergency!)" if is_vetoed else "Condition met"
                 )
                 logger.info(
-                    f"Executing SELL for {coin}. {reason_str}. Price: {current_price}, Stop: {dynamic_stop_loss}, TP: {take_profit}"
+                    f"Executing SELL for {coin}. {reason_str}. Price: {current_price}, Stop: {dynamic_stop_loss}"
                 )
                 try:
                     precision = api.get_market_precision(f"{coin}USDT")
