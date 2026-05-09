@@ -35,7 +35,7 @@ TARGET_COINS = [
     "TRX",
     "ARB",
 ]
-BASE_TRADE_USDT = Decimal("50.0")
+BASE_TRADE_USDT = Decimal("100.0")
 MAX_BANK_ALLOCATION_PCT = Decimal("0.15")
 
 
