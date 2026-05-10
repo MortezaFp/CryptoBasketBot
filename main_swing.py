@@ -135,7 +135,7 @@ def check_global_veto(coin: str, local_change_pct: float) -> bool:
         return False
 
 
-def get_ai_signal(coin: str, indicators: dict) -> dict:
+def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         logger.error("GEMINI_API_KEY not set")
@@ -153,11 +153,14 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     BB Upper: {indicators['bb_upper']}
     ATR: {indicators['atr']}
 
+    Current Macro Market Regime: {market_regime}
+
+    CRITICAL INSTRUCTION: If the regime is 'Bullish Trend', you MUST favor momentum. Do NOT penalize the coin for touching the Upper Bollinger Band unless RSI is extreme (> 80). Allow trend-following entries. If the regime is 'Neutral Sideways' or 'Bearish Bleed', revert to strict mean-reversion and reject Upper Band touches.
+
     Is this a confirmed high-probability swing trade entry, or a fake-out? 
     Respond ONLY with a valid JSON object containing: 'signal' (BUY, SELL, or HOLD), 'confidence_score' (1-100), and 'reason' (string).
-
     """
-    logger.info(f"🧠 Sending Prompt to AI for {coin}:\n{prompt}")
+    logger.info(f"🧠 Sending Regime-Aware Prompt to AI for {coin}:\n{prompt}")
 
     models_to_try = [
         "gemini-3.1-flash-lite",
@@ -391,9 +394,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     end_ts = int(time.time())
     start_ts = end_ts - (250 * 60 * 60)
 
-    summary_messages = []
-    coin_reports = []
-
     # Calculate Current Values for Alpha
     base_bank = bot_state.get("initial_bot_bank", 1000.0)
     market_hodl_pct = 0.0
@@ -448,19 +448,23 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         else "No resolved ghost trades this cycle."
     )
 
-    # --- 3. MACRO VIBE CHECK INITIALIZATION ---
+    # =====================================================================
+    # PHASE 1: MACRO SCAN (Gather Data & Calculate Regime)
+    # =====================================================================
+    logger.info("--- STARTING PHASE 1: MACRO SCAN ---")
+    coin_data_map = {}
     coins_above_sma = 0
     total_rsi = 0.0
     valid_coins = 0
 
     for coin in TARGET_COINS:
-        logger.info(f"Processing {coin}...")
+        logger.info(f"Scanning {coin}...")
         coin_balance = balances.get(coin, Decimal("0"))
 
         try:
             current_price = api.get_market_price(f"{coin}USDT")
         except Exception:
-            logger.warning(f"Could not fetch market price for {coin}. Skipping.")
+            logger.warning(f"Could not fetch market price for {coin}. Skipping scan.")
             continue
 
         coin_value_usdt = coin_balance * current_price
@@ -477,7 +481,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
         candles = api.get_candle_history(coin, coin_start_ts, end_ts)
         if len(candles) < 200:
-            logger.warning(f"Not enough candles for {coin}. Skipping.")
+            logger.warning(f"Not enough candles for {coin}. Skipping scan.")
             continue
 
         df = pd.DataFrame(candles)
@@ -498,39 +502,88 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             (col for col in bb.columns if col.startswith("BBU_20_")), None
         )
         if not bb_lower_col or not bb_upper_col:
-            logger.warning(f"Bollinger Band columns missing for {coin}. Skipping.")
+            logger.warning(f"Bollinger Band columns missing for {coin}. Skipping scan.")
             continue
+
         df["bb_lower"] = bb[bb_lower_col]
         df["bb_upper"] = bb[bb_upper_col]
-
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
 
         last_row = df.iloc[-1]
         if pd.isna(last_row["ema_9"]) or pd.isna(last_row["sma_200"]):
-            logger.warning(f"Indicators not fully formed for {coin}. Skipping.")
+            logger.warning(f"Indicators not fully formed for {coin}. Skipping scan.")
             continue
 
-        # Evaluate Vibe metrics
+        # Evaluate Macro Vibe metrics
         if float(current_price) > float(last_row["sma_200"]):
             coins_above_sma += 1
         total_rsi += float(last_row["rsi"])
         valid_coins += 1
 
-        indicators = {
-            "close": float(last_row["close"]),
-            "sma_200": float(last_row["sma_200"]),
-            "ema_9": float(last_row["ema_9"]),
-            "ema_21": float(last_row["ema_21"]),
-            "rsi": float(last_row["rsi"]),
-            "bb_lower": float(last_row["bb_lower"]),
-            "bb_upper": float(last_row["bb_upper"]),
-            "atr": float(last_row["atr"]),
-        }
-
         local_change_pct = local_changes.get(coin, 0.0)
         is_vetoed = check_global_veto(coin, local_change_pct)
-
         state = "IN" if coin_value_usdt >= Decimal("10.0") else "OUT"
+
+        coin_data_map[coin] = {
+            "current_price": current_price,
+            "coin_value_usdt": coin_value_usdt,
+            "coin_balance": coin_balance,
+            "df": df,
+            "last_row": last_row,
+            "is_vetoed": is_vetoed,
+            "state": state,
+            "indicators": {
+                "close": float(last_row["close"]),
+                "sma_200": float(last_row["sma_200"]),
+                "ema_9": float(last_row["ema_9"]),
+                "ema_21": float(last_row["ema_21"]),
+                "rsi": float(last_row["rsi"]),
+                "bb_lower": float(last_row["bb_lower"]),
+                "bb_upper": float(last_row["bb_upper"]),
+                "atr": float(last_row["atr"]),
+            },
+        }
+
+    # Calculate Macro Market Regime
+    if valid_coins > 0:
+        trend_health = (coins_above_sma / valid_coins) * 100
+        avg_rsi = total_rsi / valid_coins
+    else:
+        trend_health = 0
+        avg_rsi = 50
+
+    if avg_rsi > 65:
+        market_regime = "Overbought / Chop"
+    elif trend_health >= 60:
+        market_regime = "Bullish Trend"
+    elif trend_health <= 30:
+        market_regime = "Bearish Bleed"
+    else:
+        market_regime = "Neutral Sideways"
+
+    logger.info(
+        f"Phase 1 Complete. Detected Regime: {market_regime} (Trend Health: {trend_health:.1f}%, Avg RSI: {avg_rsi:.1f})"
+    )
+
+    # =====================================================================
+    # PHASE 2: REGIME-AWARE EXECUTION
+    # =====================================================================
+    logger.info("--- STARTING PHASE 2: REGIME-AWARE EXECUTION ---")
+    summary_messages = []
+    coin_reports = []
+
+    for coin in TARGET_COINS:
+        if coin not in coin_data_map:
+            continue
+
+        data = coin_data_map[coin]
+        current_price = data["current_price"]
+        coin_balance = data["coin_balance"]
+        last_row = data["last_row"]
+        indicators = data["indicators"]
+        is_vetoed = data["is_vetoed"]
+        state = data["state"]
+        df = data["df"]
 
         if state == "OUT":
             if is_vetoed:
@@ -550,10 +603,12 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 )
             else:
                 logger.info(
-                    f"Math conditions met for {coin}. Sleeping for 5 seconds before AI call to avoid rate limits."
+                    f"Math conditions met for {coin}. Calling AI with Regime: {market_regime}"
                 )
-                time.sleep(5)
-                ai_resp = get_ai_signal(coin, indicators)
+                time.sleep(5)  # Rate limit protection
+
+                # We now pass the dynamic market_regime directly into the AI prompt
+                ai_resp = get_ai_signal(coin, indicators, market_regime)
 
                 if ai_resp:
                     ai_sig = ai_resp.get("signal", "NONE")
@@ -644,18 +699,14 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 logger.warning(f"Entry price is 0 for {coin}. Skipping.")
                 continue
 
-            # Extract confidence from clientOrderId if possible
             client_id = last_order.get("clientOrderId", "")
             entry_conf = (
                 client_id.split("_")[1] if client_id and "conf_" in client_id else "??"
             )
-
             current_atr = Decimal(str(last_row["atr"]))
 
-            # Initial Stop Loss
             dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
 
-            # Determine the highest price since the buy order
             order_time = int(last_order.get("time", 0))
             if order_time > 2000000000:
                 order_time = order_time // 1000
@@ -714,23 +765,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     # SAVE STATE AT THE END TO ENSURE GHOST TRADES AND BENCHMARKS ARE PERSISTED
     save_bot_state()
 
-    # --- 4. FINALIZE MACRO VIBE CHECK & CIO SUMMARY ---
-    if valid_coins > 0:
-        trend_health = (coins_above_sma / valid_coins) * 100
-        avg_rsi = total_rsi / valid_coins
-    else:
-        trend_health = 0
-        avg_rsi = 50
-
-    if avg_rsi > 65:
-        market_regime = "Overbought / Chop"
-    elif trend_health >= 60:
-        market_regime = "Bullish Trend"
-    elif trend_health <= 30:
-        market_regime = "Bearish Bleed"
-    else:
-        market_regime = "Neutral Sideways"
-
+    # --- FINAL CIO SUMMARY & TELEGRAM DISPATCH ---
     cio_summary = get_cio_summary(
         bot_pl_pct,
         market_hodl_pct,
@@ -740,7 +775,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         coin_reports,
     )
 
-    # --- 5. DISPATCH TELEGRAM REPORT ---
     if notifier:
         header_name = cycle_name or "Swing Bot"
         alpha_label = "🟢 Beating Market" if bot_alpha >= 0 else "🔴 Underperforming"
