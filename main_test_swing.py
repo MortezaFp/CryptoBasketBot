@@ -149,25 +149,20 @@ def run_simulation():
         if telegram_token and chat_id
         else None
     )
-
-    # --- AI CACHING SYSTEM TO SAVE API CREDITS & TIME ---
-    # We monkey-patch the AI signal function so that the second simulation
-    # run instantly re-uses the exact same AI evaluations as the first run!
+    
     original_get_ai_signal = main_swing.get_ai_signal
     ai_cache = {}
 
-    def cached_get_ai_signal(coin: str, indicators: dict) -> dict:
+    def cached_get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
         if coin in ai_cache:
             sim_logger.info(f"⚡ [CACHE HIT] Reusing cached AI response for {coin}")
             return ai_cache[coin]
 
-        result = original_get_ai_signal(coin, indicators)
+        result = original_get_ai_signal(coin, indicators, market_regime)
         ai_cache[coin] = result
         return result
 
-    # Override the live function with our cached version for this test execution
     main_swing.get_ai_signal = cached_get_ai_signal
-    # ----------------------------------------------------
 
     sim_logger.info("\n=== RUNNING STRICT 80+ CONFIDENCE TEST ===")
     state_file_80 = os.path.join(
