@@ -51,13 +51,10 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
         try:
             with open(self.state_file, "r") as f:
                 data = json.load(f)
-            # Restore balances/orders/initial_value and meta if present
-            meta = data.get("meta", {})
             return {
                 "balances": {k: Decimal(str(v)) for k, v in data["balances"].items()},
                 "orders": data.get("orders", []),
                 "initial_value": Decimal(str(data.get("initial_value", "1000"))),
-                "meta": meta,
             }
         except Exception as e:
             sim_logger.error(f"Failed to load state: {e}")
@@ -69,7 +66,6 @@ class SimulationSwingWallexAPI(main_swing.SwingWallexAPI):
                 "balances": {k: str(v) for k, v in self.balances.items()},
                 "orders": self.orders,
                 "initial_value": str(self.initial_value),
-                "meta": getattr(self, "meta_state", {}),
             }
             with open(self.state_file, "w") as f:
                 json.dump(data, f, indent=4)
