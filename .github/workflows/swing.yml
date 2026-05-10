@@ -27,9 +27,9 @@ jobs:
             simulation_state_swing.json
             simulation_state_swing_strct80.json
             simulation_state_swing_spec70.json
-          key: sim-state-swing-v3-${{ github.run_id }}
+          key: sim-state-swing-v4-${{ github.run_id }}
           restore-keys: |
-            sim-state-swing-v3-
+            sim-state-swing-v4-
 
       - name: Run Swing Trading Script
         env:

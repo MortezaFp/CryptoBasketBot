@@ -190,6 +190,51 @@ def get_ai_signal(coin: str, indicators: dict) -> dict:
     return None
 
 
+def get_cio_summary(
+    pl_pct: float,
+    market_hodl_pct: float,
+    alpha_pct: float,
+    regime: str,
+    resolved_ghosts: str,
+    coin_reports: list,
+) -> str:
+    """Generates the C.I.O. Macro Analysis Summary using Gemini."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return "CIO Summary unavailable (No API Key)."
+
+    client = genai.Client(api_key=api_key)
+    prompt = f"""
+    You are a blunt, senior Quant Fund Manager. Review this 15-minute cycle report.
+    Bot P/L: {pl_pct:.2f}%
+    Market HODL Benchmark: {market_hodl_pct:.2f}%
+    Bot Alpha: {alpha_pct:.2f}%
+    Regime: {regime}
+    Resolved Ghost Trades (AI Audit): {resolved_ghosts}
+    Coin Statuses: {json.dumps(coin_reports)}
+
+    Provide a 3-sentence summary of the market vibe and the bot's current performance. Do not use formatting like bold or asterisks.
+    """
+    models_to_try = [
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
+        "gemini-2.5-flash",
+        "gemma-4-31b-it",
+    ]
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and response.text:
+                    return response.text.strip().replace("*", "")
+            except Exception:
+                time.sleep(2)
+    return "CIO is currently unreachable due to rate limits."
+
+
 def fmt_price(p) -> str:
     """Formats price to max 10 decimals, removing trailing zeros."""
     return f"{float(p):.10f}".rstrip("0").rstrip(".")
@@ -210,6 +255,68 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         else None
     )
 
+    # --- STATE MANAGEMENT LOGIC (Integrates with GH Actions Cache natively) ---
+    if not hasattr(api, "state_file"):
+        api.state_file = os.path.join(get_app_path(), f"swing_state_live.json")
+
+    bot_state = {
+        "initial_benchmark_prices": {},
+        "ghost_trades": [],
+        "initial_bot_bank": 0.0,
+    }
+    if os.path.exists(api.state_file):
+        try:
+            with open(api.state_file, "r") as f:
+                data = json.load(f)
+                bot_state["initial_benchmark_prices"] = data.get(
+                    "initial_benchmark_prices", {}
+                )
+                bot_state["ghost_trades"] = data.get("ghost_trades", [])
+                bot_state["initial_bot_bank"] = data.get("initial_bot_bank", 0.0)
+        except Exception:
+            pass
+
+    def save_bot_state():
+        if hasattr(api, "save_state") and getattr(api, "_state_patched", False):
+            api.save_state()
+        else:
+            try:
+                data = {}
+                if os.path.exists(api.state_file):
+                    with open(api.state_file, "r") as f:
+                        data = json.load(f)
+                data["initial_benchmark_prices"] = bot_state["initial_benchmark_prices"]
+                data["ghost_trades"] = bot_state["ghost_trades"]
+                data["initial_bot_bank"] = bot_state["initial_bot_bank"]
+                with open(api.state_file, "w") as f:
+                    json.dump(data, f, indent=4)
+            except Exception as e:
+                logger.error(f"Failed to save bot state: {e}")
+
+    # Patch API save_state if in simulation to protect observability keys
+    if hasattr(api, "save_state") and not getattr(api, "_state_patched", False):
+        original_save = api.save_state
+
+        def patched_save_state():
+            original_save()
+            try:
+                if os.path.exists(api.state_file):
+                    with open(api.state_file, "r") as f:
+                        data = json.load(f)
+                    data["initial_benchmark_prices"] = bot_state[
+                        "initial_benchmark_prices"
+                    ]
+                    data["ghost_trades"] = bot_state["ghost_trades"]
+                    data["initial_bot_bank"] = bot_state["initial_bot_bank"]
+                    with open(api.state_file, "w") as f:
+                        json.dump(data, f, indent=4)
+            except Exception:
+                pass
+
+        api.save_state = patched_save_state
+        api._state_patched = True
+    # --------------------------------------------------------------------------
+
     # Pre-Loop Bank Check
     balances_resp = api.get_account_balances()
     if not balances_resp.get("success"):
@@ -224,6 +331,38 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     initial_bank = current_bank
 
     logger.info(f"Starting Bank: {current_bank} USDT")
+
+    # Fetch Wallex markets to get local 24h change percent and live prices for tracking
+    local_changes = {}
+    current_prices = {}
+    try:
+        w_markets_resp = requests.get(
+            "https://api.wallex.ir/hector/web/v1/markets", timeout=10
+        ).json()
+        w_markets = w_markets_resp.get("result", {}).get("markets", [])
+        for m in w_markets:
+            if m.get("quote_asset") == "USDT":
+                base_asset = m.get("base_asset")
+                local_changes[base_asset] = float(m.get("change_24h", 0.0) or 0.0)
+                if base_asset in TARGET_COINS:
+                    current_prices[base_asset] = float(
+                        str(m.get("price", "0")).replace(",", "")
+                    )
+    except Exception as e:
+        logger.error(f"Failed to fetch Wallex markets: {e}")
+
+    # --- 1. INITIALIZE HODL BENCHMARK ---
+    if not bot_state["initial_benchmark_prices"] and current_prices:
+        for coin in TARGET_COINS:
+            if coin in current_prices:
+                bot_state["initial_benchmark_prices"][coin] = current_prices[coin]
+        # Calculate initial bot total value for baseline
+        initial_val = float(current_bank)
+        for coin in TARGET_COINS:
+            initial_val += float(balances.get(coin, Decimal("0"))) * current_prices.get(
+                coin, 0
+            )
+        bot_state["initial_bot_bank"] = initial_val if initial_val > 0 else 1000.0
 
     # Clean up deprecated coins
     for b_coin, amt in balances.items():
@@ -243,9 +382,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                     )
                     qty = amt.quantize(Decimal(precision_str), rounding=ROUND_DOWN)
                     api.create_order(f"{b_coin}USDT", "SELL", qty, type="MARKET")
-                    current_bank += (
-                        b_value  # Roughly update bank based on estimated value
-                    )
+                    current_bank += b_value
             except Exception as e:
                 logger.warning(
                     f"Failed to check/liquidate deprecated coin {b_coin}: {e}"
@@ -257,20 +394,64 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     summary_messages = []
     coin_reports = []
 
-    # Fetch Wallex markets to get local 24h change percent for the Veto check
-    local_changes = {}
-    try:
-        w_markets_resp = requests.get(
-            "https://api.wallex.ir/hector/web/v1/markets", timeout=10
-        ).json()
-        w_markets = w_markets_resp.get("result", {}).get("markets", [])
-        for m in w_markets:
-            if m.get("quote_asset") == "USDT":
-                local_changes[m.get("base_asset")] = float(
-                    m.get("change_24h", 0.0) or 0.0
+    # Calculate Current Values for Alpha
+    base_bank = bot_state.get("initial_bot_bank", 1000.0)
+    market_hodl_pct = 0.0
+    if bot_state["initial_benchmark_prices"]:
+        num_coins = len(bot_state["initial_benchmark_prices"])
+        if num_coins > 0:
+            allocation_per_coin = base_bank / num_coins
+            current_basket_value = 0.0
+            for coin, initial_price in bot_state["initial_benchmark_prices"].items():
+                c_price = current_prices.get(coin, initial_price)
+                if initial_price > 0:
+                    amount_bought = allocation_per_coin / initial_price
+                    current_basket_value += amount_bought * c_price
+            market_hodl_pct = ((current_basket_value - base_bank) / base_bank) * 100.0
+
+    total_bot_value = float(current_bank)
+    for coin in TARGET_COINS:
+        bal = float(balances.get(coin, Decimal("0")))
+        if bal > 0 and coin in current_prices:
+            total_bot_value += bal * current_prices[coin]
+
+    bot_pl_pct = ((total_bot_value - base_bank) / base_bank) * 100.0
+    bot_alpha = bot_pl_pct - market_hodl_pct
+
+    # --- 2. RESOLVE GHOST TRADES ---
+    resolved_ghosts = []
+    kept_ghosts = []
+    current_time = int(time.time())
+
+    for ghost in bot_state["ghost_trades"]:
+        coin = ghost["coin"]
+        entry_time = ghost["timestamp"]
+        entry_price = ghost["entry_price"]
+
+        if current_time - entry_time > 12 * 3600:
+            c_price = current_prices.get(coin, entry_price)
+            if c_price < entry_price:
+                resolved_ghosts.append(
+                    f"{coin}: Saved Capital (Dropped from {fmt_price(entry_price)} to {fmt_price(c_price)})"
                 )
-    except Exception as e:
-        logger.error(f"Failed to fetch Wallex markets for local changes: {e}")
+            else:
+                resolved_ghosts.append(
+                    f"{coin}: Missed Gains (Rose from {fmt_price(entry_price)} to {fmt_price(c_price)})"
+                )
+        else:
+            kept_ghosts.append(ghost)
+
+    bot_state["ghost_trades"] = kept_ghosts
+    ghost_summary_text = (
+        " | ".join(resolved_ghosts)
+        if resolved_ghosts
+        else "No resolved ghost trades this cycle."
+    )
+
+    # --- 3. MACRO VIBE CHECK INITIALIZATION ---
+    coins_above_sma = 0
+    total_rsi = 0.0
+    valid_coins = 0
 
     for coin in TARGET_COINS:
         logger.info(f"Processing {coin}...")
@@ -328,6 +509,12 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         if pd.isna(last_row["ema_9"]) or pd.isna(last_row["sma_200"]):
             logger.warning(f"Indicators not fully formed for {coin}. Skipping.")
             continue
+
+        # Evaluate Vibe metrics
+        if float(current_price) > float(last_row["sma_200"]):
+            coins_above_sma += 1
+        total_rsi += float(last_row["rsi"])
+        valid_coins += 1
 
         indicators = {
             "close": float(last_row["close"]),
@@ -434,6 +621,16 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                             except Exception as e:
                                 logger.error(f"Failed to buy {coin}: {e}")
 
+                # If Math passed but AI rejected, add to Ghost Tracker
+                elif ai_resp and ai_resp.get("signal") != "BUY":
+                    bot_state["ghost_trades"].append(
+                        {
+                            "coin": coin,
+                            "entry_price": float(current_price),
+                            "timestamp": current_time,
+                        }
+                    )
+
         elif state == "IN":
             last_order = api.get_last_filled_buy_order(coin)
             if not last_order:
@@ -514,11 +711,49 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
         logger.info(f"Finished processing {coin}.")
 
+    # SAVE STATE AT THE END TO ENSURE GHOST TRADES AND BENCHMARKS ARE PERSISTED
+    save_bot_state()
+
+    # --- 4. FINALIZE MACRO VIBE CHECK & CIO SUMMARY ---
+    if valid_coins > 0:
+        trend_health = (coins_above_sma / valid_coins) * 100
+        avg_rsi = total_rsi / valid_coins
+    else:
+        trend_health = 0
+        avg_rsi = 50
+
+    if avg_rsi > 65:
+        market_regime = "Overbought / Chop"
+    elif trend_health >= 60:
+        market_regime = "Bullish Trend"
+    elif trend_health <= 30:
+        market_regime = "Bearish Bleed"
+    else:
+        market_regime = "Neutral Sideways"
+
+    cio_summary = get_cio_summary(
+        bot_pl_pct,
+        market_hodl_pct,
+        bot_alpha,
+        market_regime,
+        ghost_summary_text,
+        coin_reports,
+    )
+
+    # --- 5. DISPATCH TELEGRAM REPORT ---
     if notifier:
         header_name = cycle_name or "Swing Bot"
+        alpha_label = "🟢 Beating Market" if bot_alpha >= 0 else "🔴 Underperforming"
+
         msg = f"🔄 <b>{header_name} Cycle Complete</b>\n"
         msg += f"🏦 Starting Bank: ${initial_bank:.2f}\n"
-        msg += f"� Remaining Bank: ${current_bank:.2f}\n\n"
+        msg += f"🏦 Remaining Bank: ${current_bank:.2f}\n\n"
+
+        msg += f"🤖 <b>CIO Briefing:</b> {cio_summary}\n\n"
+        msg += f"🌐 <b>Market Regime:</b> {market_regime}\n"
+        msg += f"📈 <b>Market HODL Benchmark:</b> {market_hodl_pct:+.2f}%\n"
+        msg += f"🔥 <b>Bot Alpha (Edge):</b> {bot_alpha:+.2f}% ({alpha_label})\n"
+        msg += f"👻 <b>AI Ghost Audit:</b> {ghost_summary_text}\n\n"
 
         if summary_messages:
             msg += "<b>Executions:</b>\n" + "\n".join(summary_messages) + "\n\n"

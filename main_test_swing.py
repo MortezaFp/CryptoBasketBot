@@ -211,13 +211,14 @@ def run_simulation():
     profit_80 = total_value_80 - sim_api_80.initial_value
     profit_pct_80 = (profit_80 / sim_api_80.initial_value) * 100
 
+    # 🧹 DUST FILTER: Only show USDT, or coins worth more than $1.00
     clean_holdings_80 = {
-        k: main.fmt_price(v)
-        for k, v in sim_api_80.balances.items()
-        if (k == "USDT" and v > 1)
+        coin: f"{amount:.4f}"
+        for coin, amount in sim_api_80.balances.items()
+        if (coin == "USDT" and amount > Decimal("0.1"))
         or (
-            k != "USDT"
-            and v * market_map.get(f"{k}USDT", Decimal("0")) >= Decimal("5.0")
+            coin != "USDT"
+            and (amount * market_map.get(f"{coin}USDT", Decimal("0"))) >= Decimal("1.0")
         )
     }
 
@@ -250,12 +251,23 @@ def run_simulation():
     profit_70 = total_value_70 - sim_api_70.initial_value
     profit_pct_70 = (profit_70 / sim_api_70.initial_value) * 100
 
+    # 🧹 DUST FILTER: Only show USDT, or coins worth more than $1.00
+    clean_holdings_70 = {
+        coin: f"{amount:.4f}"
+        for coin, amount in sim_api_70.balances.items()
+        if (coin == "USDT" and amount > Decimal("0.1"))
+        or (
+            coin != "USDT"
+            and (amount * market_map.get(f"{coin}USDT", Decimal("0"))) >= Decimal("1.0")
+        )
+    }
+
     log_msg_70 = (
         f"\n📊 SWING SIMULATION STATS (SPECULATIVE 70+):\n"
         f"   Initial Value: ${sim_api_70.initial_value:,.2f}\n"
         f"   Current Value: ${total_value_70:,.2f}\n"
         f"   P/L: ${profit_70:,.2f} ({profit_pct_70:+.2f}%)\n"
-        f"   Holdings: { {k: f'{v:.4f}' for k, v in sim_api_70.balances.items() if v > 0} }\n"
+        f"   Holdings: {clean_holdings_70}\n"
     )
     sim_logger.info(log_msg_70)
     if notifier:
@@ -264,7 +276,7 @@ def run_simulation():
             f"🏦 Initial Value: ${sim_api_70.initial_value:,.2f}\n"
             f"💰 Current Value: ${total_value_70:,.2f}\n"
             f"📈 P/L: ${profit_70:,.2f} ({profit_pct_70:+.2f}%)\n"
-            f"🎒 Holdings: { {k: f'{v:.4f}' for k, v in sim_api_70.balances.items() if v > 0} }"
+            f"🎒 Holdings: {clean_holdings_70}"
         )
         notifier.send_message(tg_msg)
         notifier.flush()
