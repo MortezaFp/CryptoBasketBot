@@ -223,6 +223,24 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     current_bank = balances.get("USDT", Decimal("0"))
     initial_bank = current_bank
 
+    # --- Persistent meta/state dictionary (for observability) ---
+    # Try to attach/use a meta_state dict stored on the API object. Simulation
+    # subclasses save this to the GH Actions cache via their save_state.
+    meta = getattr(api, "meta_state", None)
+    if meta is None:
+        # if api offers load_state, try to read meta from it
+        try:
+            raw = None
+            if hasattr(api, "load_state"):
+                raw = api.load_state()
+            if isinstance(raw, dict) and raw.get("meta") is not None:
+                meta = raw.get("meta")
+            else:
+                meta = {}
+        except Exception:
+            meta = {}
+        setattr(api, "meta_state", meta)
+
     logger.info(f"Starting Bank: {current_bank} USDT")
 
     # Clean up deprecated coins
@@ -271,6 +289,11 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 )
     except Exception as e:
         logger.error(f"Failed to fetch Wallex markets for local changes: {e}")
+
+    # Metrics accumulators for regime detection
+    processed_coins = 0
+    count_above_sma200 = 0
+    rsi_accum = 0.0
 
     for coin in TARGET_COINS:
         logger.info(f"Processing {coin}...")
@@ -383,6 +406,18 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                     coin_reports.append(
                         f"⚠️ <b>{coin}</b> @ ${fmt_price(current_price)}: Skipped | AI Request Failed"
                     )
+
+                # Ghost Trade Tracking: math conditions met but AI blocked entry
+                if ai_resp and ai_resp.get("signal") in ("HOLD", "SELL"):
+                    ghost = meta.get("ghost_trades", [])
+                    ghost.append(
+                        {
+                            "coin": coin,
+                            "entry_price": float(current_price),
+                            "timestamp": int(time.time()),
+                        }
+                    )
+                    meta["ghost_trades"] = ghost
 
                 if ai_resp and ai_resp.get("signal") == "BUY":
                     conf = ai_resp.get("confidence_score", 0)
@@ -512,13 +547,161 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                     f"💼 <b>{coin}</b> @ ${fmt_price(current_price)}: Holding | Entry: ${fmt_price(entry_price)} (Conf: {entry_conf})"
                 )
 
+        # accumulate for regime detection
+        try:
+            processed_coins += 1
+            if float(last_row["close"]) > float(last_row["sma_200"]):
+                count_above_sma200 += 1
+            rsi_accum += float(last_row["rsi"])
+        except Exception:
+            pass
+
         logger.info(f"Finished processing {coin}.")
 
     if notifier:
         header_name = cycle_name or "Swing Bot"
-        msg = f"🔄 <b>{header_name} Cycle Complete</b>\n"
-        msg += f"🏦 Starting Bank: ${initial_bank:.2f}\n"
-        msg += f"🏦 Remaining Bank: ${current_bank:.2f}\n\n"
+
+        # --- HODL Benchmark & Alpha Tracker ---
+        # Initialize benchmark prices on first run
+        if "initial_benchmark_prices" not in meta:
+            try:
+                meta["initial_benchmark_prices"] = {
+                    c: float(api.get_market_price(f"{c}USDT")) for c in TARGET_COINS
+                }
+                # store initial amounts for equal-weight $1000 basket
+                initial_total = 1000.0
+                per_coin = initial_total / len(TARGET_COINS)
+                meta["hodl_initial_amounts"] = {
+                    c: per_coin / meta["initial_benchmark_prices"][c]
+                    for c in TARGET_COINS
+                }
+                meta["hodl_initial_total"] = initial_total
+            except Exception as e:
+                logger.error(f"Failed to initialize HODL benchmark: {e}")
+
+        # compute current hodl basket value
+        market_hodl_value = 0.0
+        try:
+            for c in TARGET_COINS:
+                price = float(api.get_market_price(f"{c}USDT"))
+                amt = meta.get("hodl_initial_amounts", {}).get(c, 0)
+                market_hodl_value += amt * price
+        except Exception as e:
+            logger.debug(f"Failed to compute current HODL basket: {e}")
+
+        market_hodl_pct = (
+            (market_hodl_value - float(meta.get("hodl_initial_total", 1000.0)))
+            / float(meta.get("hodl_initial_total", 1000.0))
+            * 100.0
+        )
+
+        # compute actual bot P/L percent by evaluating portfolio value
+        try:
+            total_portfolio = float(current_bank)
+            for k, v in balances.items():
+                if k == "USDT":
+                    continue
+                try:
+                    p = float(api.get_market_price(f"{k}USDT"))
+                    total_portfolio += float(v) * p
+                except Exception:
+                    pass
+            initial_value = float(getattr(api, "initial_value", initial_bank))
+            bot_pl_pct = (total_portfolio - initial_value) / initial_value * 100.0
+        except Exception:
+            bot_pl_pct = 0.0
+
+        bot_alpha = bot_pl_pct - market_hodl_pct
+
+        # --- Ghost Trade Resolution (>12 hours) ---
+        ghost_summary_lines = []
+        ghosts = meta.get("ghost_trades", [])
+        now_ts = int(time.time())
+        remaining_ghosts = []
+        for g in ghosts:
+            age = now_ts - int(g.get("timestamp", 0))
+            if age > 12 * 3600:
+                try:
+                    curp = float(api.get_market_price(f"{g['coin']}USDT"))
+                    if curp < float(g.get("entry_price", 0)):
+                        ghost_summary_lines.append(
+                            f"{g['coin']}: Price fell {((curp - g['entry_price'])/g['entry_price']*100):+.2f}% — AI saved capital"
+                        )
+                    else:
+                        ghost_summary_lines.append(
+                            f"{g['coin']}: Price rose {((curp - g['entry_price'])/g['entry_price']*100):+.2f}% — AI missed gains"
+                        )
+                except Exception:
+                    ghost_summary_lines.append(f"{g['coin']}: Could not resolve price")
+            else:
+                remaining_ghosts.append(g)
+        meta["ghost_trades"] = remaining_ghosts
+
+        # --- Regime Detection ---
+        trend_health = (
+            (count_above_sma200 / processed_coins * 100.0)
+            if processed_coins > 0
+            else 0.0
+        )
+        avg_rsi = (rsi_accum / processed_coins) if processed_coins > 0 else 50.0
+        if trend_health >= 66 and avg_rsi < 70:
+            regime = "Bullish Trend"
+        elif trend_health <= 33 and avg_rsi < 45:
+            regime = "Bearish Bleed"
+        elif avg_rsi >= 70:
+            regime = "Overbought/Chop"
+        else:
+            regime = "Neutral Sideways"
+
+        # --- CIO AI Summary ---
+        def get_cio_briefing_text(payload_str: str) -> str:
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                return "(AI unavailable - GEMINI_API_KEY not set)"
+            client = genai.Client(api_key=api_key)
+            prompt = (
+                "You are a blunt, senior Quant Fund Manager. Review this 15-minute cycle report. "
+                "Provide a 3-sentence summary of the market vibe and the bot's current performance. Use no formatting.\n"
+                + payload_str
+            )
+            models_to_try = [
+                "gemini-3.1-flash-lite",
+                "gemini-flash-latest",
+                "gemini-2.5-flash",
+                "gemma-4-31b-it",
+            ]
+            for model_name in models_to_try:
+                for attempt in range(2):
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config={"response_mime_type": "text/plain"},
+                        )
+                        return resp.text.strip()
+                    except Exception as e:
+                        logger.debug(f"CIO AI error with {model_name}: {e}")
+                        time.sleep(1)
+            return "(AI briefing failed)"
+
+        payload = (
+            f"Regime: {regime}\nTrendHealth: {trend_health:.2f}%\nAvgRSI: {avg_rsi:.2f}\n"
+            f"MarketHODL_Pct: {market_hodl_pct:.2f}%\nBot_PL_Pct: {bot_pl_pct:.2f}%\nBot_Alpha: {bot_alpha:.2f}%\n"
+            f"GhostsResolved: {len(ghost_summary_lines)}"
+        )
+        cio_brief = get_cio_briefing_text(payload)
+
+        msg = f"🤖 CIO Briefing: {cio_brief}\n"
+        msg += f"🌐 Market Regime: {regime}\n"
+        msg += f"📈 Market HODL Benchmark: {market_hodl_pct:+.2f}%\n"
+        beat_word = "Beating" if bot_alpha >= 0 else "Underperforming"
+        msg += f"🔥 Bot Alpha (Edge): {bot_alpha:+.2f}% ({beat_word})\n"
+        ghost_audit_summary = (
+            "; ".join(ghost_summary_lines)
+            if ghost_summary_lines
+            else "No resolved ghost trades"
+        )
+        msg += f"👻 AI Ghost Audit: {ghost_audit_summary}\n\n"
 
         if summary_messages:
             msg += "<b>Executions:</b>\n" + "\n".join(summary_messages) + "\n\n"
