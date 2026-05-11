@@ -140,7 +140,6 @@ def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
 
     client = genai.Client(api_key=api_key)
 
-    # NEW PULLBACK PROMPT
     prompt = f"""
     Analyze this technical data for {coin}:
     Price: {indicators['close']}
@@ -573,7 +572,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         df = data["df"]
 
         if state == "OUT":
-            # NEW PULLBACK MATH RULES
             if is_vetoed:
                 reason = "Global Veto Triggered (Binance Crash/Lag)"
             elif last_row["close"] <= last_row["sma_200"]:
@@ -706,15 +704,12 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 new_stop = highest_price - (Decimal("1.0") * current_atr)
                 dynamic_stop_loss = max(dynamic_stop_loss, new_stop)
 
-            sell_condition = (
-                is_vetoed
-                or (current_price <= dynamic_stop_loss)
-                or (last_row["ema_9"] < last_row["ema_21"])
-            )
+            # --- BUG FIX: Removed the EMA crossover condition ---
+            sell_condition = is_vetoed or (current_price <= dynamic_stop_loss)
 
             if sell_condition:
                 reason_str = (
-                    "Global Veto (Emergency!)" if is_vetoed else "Condition met"
+                    "Global Veto (Emergency!)" if is_vetoed else "Stop Loss Triggered"
                 )
                 logger.info(
                     f"Executing SELL for {coin}. {reason_str}. Price: {current_price}, Stop: {dynamic_stop_loss}"
