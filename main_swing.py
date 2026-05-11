@@ -107,7 +107,6 @@ def check_global_veto(coin: str, local_change_pct: float) -> bool:
     try:
         binance_url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={coin}USDT"
         resp = requests.get(binance_url, timeout=5)
-        # If the coin doesn't exist on Binance (like SLVON or XAUT), don't veto.
         if resp.status_code == 400:
             return False
 
@@ -115,14 +114,12 @@ def check_global_veto(coin: str, local_change_pct: float) -> bool:
         data = resp.json()
         global_change_pct = float(data.get("priceChangePercent", 0.0))
 
-        # 2A. Global Crash
         if global_change_pct < -3.0:
             logger.warning(
                 f"VETO 🚨: {coin} Binance 24h drop is {global_change_pct:.2f}% (< -3%)"
             )
             return True
 
-        # 2B. Divergence (Lag)
         if (local_change_pct - global_change_pct) > 1.5:
             logger.warning(
                 f"VETO 🚨: {coin} Divergence! Local ({local_change_pct:.2f}%) minus Global ({global_change_pct:.2f}%) > 1.5%"
@@ -142,6 +139,8 @@ def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
         return None
 
     client = genai.Client(api_key=api_key)
+
+    # NEW PULLBACK PROMPT
     prompt = f"""
     Analyze this technical data for {coin}:
     Price: {indicators['close']}
@@ -155,12 +154,15 @@ def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
 
     Current Macro Market Regime: {market_regime}
 
-    CRITICAL INSTRUCTION: If the regime is 'Bullish Trend', you MUST favor momentum. Do NOT penalize the coin for touching the Upper Bollinger Band unless RSI is extreme (> 80). Allow trend-following entries. If the regime is 'Neutral Sideways' or 'Bearish Bleed', revert to strict mean-reversion and reject Upper Band touches.
+    CRITICAL INSTRUCTION - THE PULLBACK STRATEGY: 
+    Your goal is to buy "The Dip" in an established uptrend. The price is already above the 200 SMA. 
+    Look for coins where the RSI has cooled off (between 35 and 55) or the price has pulled back to touch the Lower Bollinger Band or the 21 EMA. 
+    DO NOT buy if the RSI is above 60. We want to enter on temporary weakness, not chase green candles.
 
-    Is this a confirmed high-probability swing trade entry, or a fake-out? 
+    Is this a high-probability "buy the dip" setup with good support?
     Respond ONLY with a valid JSON object containing: 'signal' (BUY, SELL, or HOLD), 'confidence_score' (1-100), and 'reason' (string).
     """
-    logger.info(f"🧠 Sending Regime-Aware Prompt to AI for {coin}:\n{prompt}")
+    logger.info(f"🧠 Sending Pullback-Aware Prompt to AI for {coin}:\n{prompt}")
 
     models_to_try = [
         "gemini-3.1-flash-lite",
@@ -201,7 +203,6 @@ def get_cio_summary(
     resolved_ghosts: str,
     coin_reports: list,
 ) -> str:
-    """Generates the C.I.O. Macro Analysis Summary using Gemini."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return "CIO Summary unavailable (No API Key)."
@@ -239,7 +240,6 @@ def get_cio_summary(
 
 
 def fmt_price(p) -> str:
-    """Formats price to max 10 decimals, removing trailing zeros."""
     return f"{float(p):.10f}".rstrip("0").rstrip(".")
 
 
@@ -258,7 +258,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         else None
     )
 
-    # --- STATE MANAGEMENT LOGIC (Integrates with GH Actions Cache natively) ---
     if not hasattr(api, "state_file"):
         api.state_file = os.path.join(get_app_path(), f"swing_state_live.json")
 
@@ -296,7 +295,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             except Exception as e:
                 logger.error(f"Failed to save bot state: {e}")
 
-    # Patch API save_state if in simulation to protect observability keys
     if hasattr(api, "save_state") and not getattr(api, "_state_patched", False):
         original_save = api.save_state
 
@@ -318,9 +316,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
         api.save_state = patched_save_state
         api._state_patched = True
-    # --------------------------------------------------------------------------
 
-    # Pre-Loop Bank Check
     balances_resp = api.get_account_balances()
     if not balances_resp.get("success"):
         logger.error("Failed to get balances")
@@ -335,7 +331,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
     logger.info(f"Starting Bank: {current_bank} USDT")
 
-    # Fetch Wallex markets to get local 24h change percent and live prices for tracking
     local_changes = {}
     current_prices = {}
     try:
@@ -354,12 +349,10 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     except Exception as e:
         logger.error(f"Failed to fetch Wallex markets: {e}")
 
-    # --- 1. INITIALIZE HODL BENCHMARK ---
     if not bot_state["initial_benchmark_prices"] and current_prices:
         for coin in TARGET_COINS:
             if coin in current_prices:
                 bot_state["initial_benchmark_prices"][coin] = current_prices[coin]
-        # Calculate initial bot total value for baseline
         initial_val = float(current_bank)
         for coin in TARGET_COINS:
             initial_val += float(balances.get(coin, Decimal("0"))) * current_prices.get(
@@ -367,7 +360,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             )
         bot_state["initial_bot_bank"] = initial_val if initial_val > 0 else 1000.0
 
-    # Clean up deprecated coins
     for b_coin, amt in balances.items():
         if b_coin == "USDT" or b_coin in TARGET_COINS:
             continue
@@ -394,7 +386,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     end_ts = int(time.time())
     start_ts = end_ts - (250 * 60 * 60)
 
-    # Calculate Current Values for Alpha
     base_bank = bot_state.get("initial_bot_bank", 1000.0)
     market_hodl_pct = 0.0
     if bot_state["initial_benchmark_prices"]:
@@ -418,7 +409,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     bot_pl_pct = ((total_bot_value - base_bank) / base_bank) * 100.0
     bot_alpha = bot_pl_pct - market_hodl_pct
 
-    # --- 2. RESOLVE GHOST TRADES ---
     resolved_ghosts = []
     kept_ghosts = []
     current_time = int(time.time())
@@ -449,7 +439,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     )
 
     # =====================================================================
-    # PHASE 1: MACRO SCAN (Gather Data & Calculate Regime)
+    # PHASE 1: MACRO SCAN
     # =====================================================================
     logger.info("--- STARTING PHASE 1: MACRO SCAN ---")
     coin_data_map = {}
@@ -468,7 +458,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             continue
 
         coin_value_usdt = coin_balance * current_price
-
         coin_start_ts = start_ts
         if coin_value_usdt >= Decimal("10.0"):
             last_order = api.get_last_filled_buy_order(coin)
@@ -514,7 +503,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             logger.warning(f"Indicators not fully formed for {coin}. Skipping scan.")
             continue
 
-        # Evaluate Macro Vibe metrics
         if float(current_price) > float(last_row["sma_200"]):
             coins_above_sma += 1
         total_rsi += float(last_row["rsi"])
@@ -544,7 +532,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             },
         }
 
-    # Calculate Macro Market Regime
     if valid_coins > 0:
         trend_health = (coins_above_sma / valid_coins) * 100
         avg_rsi = total_rsi / valid_coins
@@ -566,7 +553,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     )
 
     # =====================================================================
-    # PHASE 2: REGIME-AWARE EXECUTION
+    # PHASE 2: REGIME-AWARE EXECUTION (PULLBACK STRATEGY)
     # =====================================================================
     logger.info("--- STARTING PHASE 2: REGIME-AWARE EXECUTION ---")
     summary_messages = []
@@ -586,14 +573,13 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         df = data["df"]
 
         if state == "OUT":
+            # NEW PULLBACK MATH RULES
             if is_vetoed:
                 reason = "Global Veto Triggered (Binance Crash/Lag)"
-            elif last_row["ema_9"] <= last_row["ema_21"]:
-                reason = f"EMA9 ({last_row['ema_9']:.2f}) &lt;= EMA21 ({last_row['ema_21']:.2f})"
-            elif last_row["rsi"] <= 50:
-                reason = f"RSI ({last_row['rsi']:.2f}) &lt;= 50"
             elif last_row["close"] <= last_row["sma_200"]:
-                reason = f"Price ({last_row['close']:.2f}) &lt;= SMA200 ({last_row['sma_200']:.2f})"
+                reason = f"Price ({last_row['close']:.2f}) &lt;= SMA200 ({last_row['sma_200']:.2f}) [Not in Macro Uptrend]"
+            elif last_row["rsi"] >= 65:
+                reason = f"RSI ({last_row['rsi']:.2f}) &gt;= 65 [Too Overbought to buy the dip]"
             else:
                 reason = None
 
@@ -605,9 +591,8 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 logger.info(
                     f"Math conditions met for {coin}. Calling AI with Regime: {market_regime}"
                 )
-                time.sleep(5)  # Rate limit protection
+                time.sleep(5)
 
-                # We now pass the dynamic market_regime directly into the AI prompt
                 ai_resp = get_ai_signal(coin, indicators, market_regime)
 
                 if ai_resp:
@@ -676,7 +661,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                             except Exception as e:
                                 logger.error(f"Failed to buy {coin}: {e}")
 
-                # If Math passed but AI rejected, add to Ghost Tracker
                 elif ai_resp and ai_resp.get("signal") != "BUY":
                     bot_state["ghost_trades"].append(
                         {
@@ -718,7 +702,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 highest_price = current_price
             highest_price = max(highest_price, current_price)
 
-            # Trailing Profit Logic
             if highest_price >= entry_price * Decimal("1.08"):
                 new_stop = highest_price - (Decimal("1.0") * current_atr)
                 dynamic_stop_loss = max(dynamic_stop_loss, new_stop)
@@ -762,10 +745,8 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
         logger.info(f"Finished processing {coin}.")
 
-    # SAVE STATE AT THE END TO ENSURE GHOST TRADES AND BENCHMARKS ARE PERSISTED
     save_bot_state()
 
-    # --- FINAL CIO SUMMARY & TELEGRAM DISPATCH ---
     cio_summary = get_cio_summary(
         bot_pl_pct,
         market_hodl_pct,
@@ -794,7 +775,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
         msg += "<b>Coin Reports:</b>\n" + "\n".join(coin_reports)
 
-        # Split message if it's too long for Telegram (max 4096 chars)
         if len(msg) > 4000:
             parts = [msg[i : i + 4000] for i in range(0, len(msg), 4000)]
             for part in parts:
