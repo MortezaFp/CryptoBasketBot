@@ -140,6 +140,7 @@ def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
 
     client = genai.Client(api_key=api_key)
 
+    # --- 🔴 UPGRADE 1: REGIME-ADAPTIVE PROMPT ---
     prompt = f"""
     Analyze this technical data for {coin}:
     Price: {indicators['close']}
@@ -153,15 +154,14 @@ def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
 
     Current Macro Market Regime: {market_regime}
 
-    CRITICAL INSTRUCTION - THE PULLBACK REVERSAL STRATEGY: 
-    Your goal is to buy a confirmed bounce in an established uptrend. The price is above the 200 SMA, and the current candle is green (showing a bounce).
-    DO NOT catch falling knives. You must verify that the recent dip has found support (e.g., bouncing off the Lower Bollinger Band or the 21 EMA).
-    If the RSI is above 60, it is too late to enter. 
-    
-    Is this a high-probability reversal off support, or is it a fake-out before further dropping?
+    CRITICAL INSTRUCTION - REGIME ADAPTIVE STRATEGY: 
+    If the Regime is 'Bullish Trend': You are a momentum breakout trader. Look for strong volume, EMAs fanning up, and price action riding the Upper Bollinger Band. DO NOT penalize high RSI (up to 80 is fine). Buy strength.
+    If the Regime is 'Neutral Sideways' or 'Bearish Bleed': You are a mean-reversion dip sniper. You must ONLY buy strong green reversal candles bouncing off the Lower Bollinger Band or 21 EMA. RSI must be cooled off (< 55). DO NOT catch falling knives.
+
+    Based on the current regime, is this a high-probability entry?
     Respond ONLY with a valid JSON object containing: 'signal' (BUY, SELL, or HOLD), 'confidence_score' (1-100), and 'reason' (string).
     """
-    logger.info(f"🧠 Sending Pullback-Aware Prompt to AI for {coin}:\n{prompt}")
+    logger.info(f"🧠 Sending Regime-Adaptive Prompt to AI for {coin}:\n{prompt}")
 
     models_to_try = [
         "gemini-3.1-flash-lite",
@@ -384,6 +384,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
     end_ts = int(time.time())
     start_ts = end_ts - (250 * 60 * 60)
+    current_time = end_ts
 
     base_bank = bot_state.get("initial_bot_bank", 1000.0)
     market_hodl_pct = 0.0
@@ -410,7 +411,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
 
     resolved_ghosts = []
     kept_ghosts = []
-    current_time = int(time.time())
 
     for ghost in bot_state["ghost_trades"]:
         coin = ghost["coin"]
@@ -476,6 +476,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         df["close"] = pd.to_numeric(df["close"])
         df["high"] = pd.to_numeric(df["high"])
         df["low"] = pd.to_numeric(df["low"])
+        df["open"] = pd.to_numeric(df["open"])
 
         df["ema_9"] = ta.ema(df["close"], length=9)
         df["ema_21"] = ta.ema(df["close"], length=21)
@@ -552,9 +553,9 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
     )
 
     # =====================================================================
-    # PHASE 2: REGIME-AWARE EXECUTION (PULLBACK STRATEGY)
+    # PHASE 2: REGIME-ADAPTIVE EXECUTION
     # =====================================================================
-    logger.info("--- STARTING PHASE 2: REGIME-AWARE EXECUTION ---")
+    logger.info("--- STARTING PHASE 2: REGIME-ADAPTIVE EXECUTION ---")
     summary_messages = []
     coin_reports = []
 
@@ -572,20 +573,29 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
         df = data["df"]
 
         if state == "OUT":
+            reason = None
             if is_vetoed:
                 reason = "Global Veto Triggered (Binance Crash/Lag)"
             elif last_row["close"] <= last_row["sma_200"]:
-                reason = f"Price ({last_row['close']:.2f}) <= SMA200 ({last_row['sma_200']:.2f}) [Not in Macro Uptrend]"
-            elif last_row["rsi"] >= 65:
-                reason = f"RSI ({last_row['rsi']:.2f}) >= 65 [Too Overbought to buy the dip]"
-
-            elif last_row["close"] <= last_row["open"]:
-                reason = "Actively Dropping (Red Candle) [Waiting for Support Bounce]"
-            elif (last_row["close"] - last_row["open"]) < (0.3 * last_row["atr"]):
-                reason = f"Weak Bounce: Green body is less than 30% of ATR [Fake-out risk]"
-            
+                reason = f"Price ({last_row['close']:.2f}) &lt;= SMA200 ({last_row['sma_200']:.2f}) [Not in Macro Uptrend]"
             else:
-                reason = None
+                # --- 🔴 UPGRADE 2: DUAL-LOGIC MATH FILTERS ---
+                if market_regime == "Bullish Trend":
+                    if last_row["ema_9"] <= last_row["ema_21"]:
+                        reason = f"EMA9 ({last_row['ema_9']:.2f}) &lt;= EMA21 ({last_row['ema_21']:.2f}) [Lacking Momentum]"
+                    elif last_row["rsi"] >= 80:
+                        reason = (
+                            f"RSI ({last_row['rsi']:.2f}) &gt;= 80 [Extreme Exhaustion]"
+                        )
+                else:
+                    if last_row["rsi"] >= 60:
+                        reason = f"RSI ({last_row['rsi']:.2f}) &gt;= 60 [Too Overbought for Chop]"
+                    elif last_row["close"] <= last_row["open"]:
+                        reason = "Actively Dropping (Red Candle) [Waiting for Support Bounce]"
+                    elif (last_row["close"] - last_row["open"]) < (
+                        0.3 * last_row["atr"]
+                    ):
+                        reason = f"Weak Bounce: Green body &lt; 30% ATR [Fake-out risk]"
 
             if reason:
                 coin_reports.append(
@@ -693,11 +703,17 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             )
             current_atr = Decimal(str(last_row["atr"]))
 
-            dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
-
             order_time = int(last_order.get("time", 0))
             if order_time > 2000000000:
                 order_time = order_time // 1000
+
+            # --- 🔴 UPGRADE 3: 4-HOUR TIME STOP ---
+            time_held_seconds = current_time - order_time
+            is_stagnant = (time_held_seconds >= 4 * 3600) and (
+                current_price <= entry_price * Decimal("1.005")
+            )
+
+            dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
 
             df_since_buy = df[df["time"] >= order_time]
             if not df_since_buy.empty:
@@ -710,12 +726,21 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 new_stop = highest_price - (Decimal("1.0") * current_atr)
                 dynamic_stop_loss = max(dynamic_stop_loss, new_stop)
 
-            sell_condition = is_vetoed or (current_price <= dynamic_stop_loss)
+            sell_condition = (
+                is_vetoed or (current_price <= dynamic_stop_loss) or is_stagnant
+            )
 
             if sell_condition:
-                reason_str = (
-                    "Global Veto (Emergency!)" if is_vetoed else "Stop Loss Triggered"
-                )
+                if is_vetoed:
+                    reason_str = "Global Veto (Emergency!)"
+                    sell_type = "EMERGENCY VETO SELL"
+                elif is_stagnant:
+                    reason_str = "4-Hour Stagnation Cut"
+                    sell_type = "STAGNATION CUT"
+                else:
+                    reason_str = "Stop Loss Triggered"
+                    sell_type = "SELL"
+
                 logger.info(
                     f"Executing SELL for {coin}. {reason_str}. Price: {current_price}, Stop: {dynamic_stop_loss}"
                 )
@@ -729,7 +754,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                     )
 
                     api.create_order(f"{coin}USDT", "SELL", qty, type="MARKET")
-                    sell_type = "EMERGENCY VETO SELL" if is_vetoed else "SELL"
                     summary_messages.append(
                         f"❌ {sell_type} {coin}: {qty} @ {fmt_price(current_price)} (Entry: {fmt_price(entry_price)} | Conf: {entry_conf})"
                     )
