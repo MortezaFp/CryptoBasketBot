@@ -687,7 +687,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             )
             current_atr = Decimal(str(last_row["atr"]))
 
-            dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
+            dynamic_stop_loss = entry_price - (Decimal("3") * current_atr)
 
             order_time = int(last_order.get("time", 0))
             if order_time > 2000000000:
@@ -704,7 +704,6 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
                 new_stop = highest_price - (Decimal("1.0") * current_atr)
                 dynamic_stop_loss = max(dynamic_stop_loss, new_stop)
 
-            # --- BUG FIX: Removed the EMA crossover condition ---
             sell_condition = is_vetoed or (current_price <= dynamic_stop_loss)
 
             if sell_condition:
