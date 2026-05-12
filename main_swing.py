@@ -576,24 +576,22 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             reason = None
             if is_vetoed:
                 reason = "Global Veto Triggered (Binance Crash/Lag)"
-            elif last_row["close"] <= last_row["sma_200"]:
-                reason = f"Price ({last_row['close']:.2f}) &lt;= SMA200 ({last_row['sma_200']:.2f}) [Not in Macro Uptrend]"
+            elif float(last_row["close"]) <= float(last_row["sma_200"]):
+                reason = f"Price ({float(last_row['close']):.2f}) &lt;= SMA200 ({float(last_row['sma_200']):.2f}) [Not in Macro Uptrend]"
             else:
-                # --- 🔴 UPGRADE 2: DUAL-LOGIC MATH FILTERS ---
+                # --- DUAL-LOGIC MATH FILTERS (WITH EXPLICIT FLOAT CASTING) ---
                 if market_regime == "Bullish Trend":
-                    if last_row["ema_9"] <= last_row["ema_21"]:
-                        reason = f"EMA9 ({last_row['ema_9']:.2f}) &lt;= EMA21 ({last_row['ema_21']:.2f}) [Lacking Momentum]"
-                    elif last_row["rsi"] >= 80:
-                        reason = (
-                            f"RSI ({last_row['rsi']:.2f}) &gt;= 80 [Extreme Exhaustion]"
-                        )
+                    if float(last_row["ema_9"]) <= float(last_row["ema_21"]):
+                        reason = f"EMA9 ({float(last_row['ema_9']):.2f}) &lt;= EMA21 ({float(last_row['ema_21']):.2f}) [Lacking Momentum]"
+                    elif float(last_row["rsi"]) >= 80:
+                        reason = f"RSI ({float(last_row['rsi']):.2f}) &gt;= 80 [Extreme Exhaustion]"
                 else:
-                    if last_row["rsi"] >= 60:
-                        reason = f"RSI ({last_row['rsi']:.2f}) &gt;= 60 [Too Overbought for Chop]"
-                    elif last_row["close"] <= last_row["open"]:
+                    if float(last_row["rsi"]) >= 60:
+                        reason = f"RSI ({float(last_row['rsi']):.2f}) &gt;= 60 [Too Overbought for Chop]"
+                    elif float(last_row["close"]) <= float(last_row["open"]):
                         reason = "Actively Dropping (Red Candle) [Waiting for Support Bounce]"
-                    elif (last_row["close"] - last_row["open"]) < (
-                        0.3 * last_row["atr"]
+                    elif (float(last_row["close"]) - float(last_row["open"])) < (
+                        0.3 * float(last_row["atr"])
                     ):
                         reason = f"Weak Bounce: Green body &lt; 30% ATR [Fake-out risk]"
 
