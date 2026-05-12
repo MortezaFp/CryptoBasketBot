@@ -153,12 +153,12 @@ def get_ai_signal(coin: str, indicators: dict, market_regime: str) -> dict:
 
     Current Macro Market Regime: {market_regime}
 
-    CRITICAL INSTRUCTION - THE PULLBACK STRATEGY: 
-    Your goal is to buy "The Dip" in an established uptrend. The price is already above the 200 SMA. 
-    Look for coins where the RSI has cooled off (between 35 and 55) or the price has pulled back to touch the Lower Bollinger Band or the 21 EMA. 
-    DO NOT buy if the RSI is above 60. We want to enter on temporary weakness, not chase green candles.
-
-    Is this a high-probability "buy the dip" setup with good support?
+    CRITICAL INSTRUCTION - THE PULLBACK REVERSAL STRATEGY: 
+    Your goal is to buy a confirmed bounce in an established uptrend. The price is above the 200 SMA, and the current candle is green (showing a bounce).
+    DO NOT catch falling knives. You must verify that the recent dip has found support (e.g., bouncing off the Lower Bollinger Band or the 21 EMA).
+    If the RSI is above 60, it is too late to enter. 
+    
+    Is this a high-probability reversal off support, or is it a fake-out before further dropping?
     Respond ONLY with a valid JSON object containing: 'signal' (BUY, SELL, or HOLD), 'confidence_score' (1-100), and 'reason' (string).
     """
     logger.info(f"🧠 Sending Pullback-Aware Prompt to AI for {coin}:\n{prompt}")
@@ -575,9 +575,15 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             if is_vetoed:
                 reason = "Global Veto Triggered (Binance Crash/Lag)"
             elif last_row["close"] <= last_row["sma_200"]:
-                reason = f"Price ({last_row['close']:.2f}) &lt;= SMA200 ({last_row['sma_200']:.2f}) [Not in Macro Uptrend]"
+                reason = f"Price ({last_row['close']:.2f}) <= SMA200 ({last_row['sma_200']:.2f}) [Not in Macro Uptrend]"
             elif last_row["rsi"] >= 65:
-                reason = f"RSI ({last_row['rsi']:.2f}) &gt;= 65 [Too Overbought to buy the dip]"
+                reason = f"RSI ({last_row['rsi']:.2f}) >= 65 [Too Overbought to buy the dip]"
+
+            elif last_row["close"] <= last_row["open"]:
+                reason = "Actively Dropping (Red Candle) [Waiting for Support Bounce]"
+            elif (last_row["close"] - last_row["open"]) < (0.3 * last_row["atr"]):
+                reason = f"Weak Bounce: Green body is less than 30% of ATR [Fake-out risk]"
+            
             else:
                 reason = None
 
@@ -687,7 +693,7 @@ def run_swing_cycle(api=None, allow_speculative=False, cycle_name=None):
             )
             current_atr = Decimal(str(last_row["atr"]))
 
-            dynamic_stop_loss = entry_price - (Decimal("3") * current_atr)
+            dynamic_stop_loss = entry_price - (Decimal("1.5") * current_atr)
 
             order_time = int(last_order.get("time", 0))
             if order_time > 2000000000:
