@@ -112,29 +112,39 @@ def load_bot_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     return telegram_token, telegram_chat_id, gemini_api_key
 
 
-def fetch_binance_candles(symbol: str) -> list:
-    """Fetches public 1-hour klines (candles) from Binance"""
+def fetch_candles(symbol: str) -> list:
+    """Fetches 1-hour klines (candles) from Wallex"""
     try:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": symbol, "interval": "1h", "limit": 250}
-        resp = requests.get(url, timeout=15)
+        url = "https://api.wallex.ir/v1/udf/history"
+        end_ts = int(time.time())
+        start_ts = end_ts - (300 * 60 * 60) # 300 hours ago
+        params = {
+            "symbol": symbol,
+            "resolution": "60",
+            "from": start_ts,
+            "to": end_ts,
+        }
+        resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
-
-        candles = []
-        for item in resp.json():
-            candles.append(
-                {
-                    "time": int(item[0]) // 1000,
-                    "open": float(item[1]),
-                    "high": float(item[2]),
-                    "low": float(item[3]),
-                    "close": float(item[4]),
-                    "volume": float(item[5]),
-                }
-            )
-        return candles
+        data = resp.json()
+        if data.get("s") == "ok":
+            candles = []
+            for i in range(len(data["t"])):
+                candles.append(
+                    {
+                        "time": int(data["t"][i]),
+                        "open": float(data["o"][i]),
+                        "high": float(data["h"][i]),
+                        "low": float(data["l"][i]),
+                        "close": float(data["c"][i]),
+                        "volume": float(data["v"][i]),
+                    }
+                )
+            logger.info(f"✓ Successfully fetched Wallex candles for {symbol}")
+            return candles
+        return []
     except Exception as e:
-        logger.error(f"Error fetching Binance candles for {symbol}: {e}")
+        logger.error(f"Error fetching Wallex candles for {symbol}: {e}")
         return []
 
 
@@ -192,17 +202,21 @@ def calculate_indicators(candles: list) -> dict:
     }
 
 
-def fetch_binance_orderbook(symbol: str) -> dict:
-    """Fetches Binance orderbook depth and computes spread/volume imbalance"""
+def fetch_orderbook(symbol: str) -> dict:
+    """Fetches orderbook depth from Wallex"""
     try:
-        url = "https://api.binance.com/api/v3/depth"
-        params = {"symbol": symbol, "limit": 20}
-        resp = requests.get(url, timeout=10)
+        url = "https://api.wallex.ir/v1/depth"
+        params = {"symbol": symbol}
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
 
-        bids = [[float(p), float(q)] for p, q in data.get("bids", [])]
-        asks = [[float(p), float(q)] for p, q in data.get("asks", [])]
+        result = data.get("result", {})
+        bids_data = result.get("bid", [])
+        asks_data = result.get("ask", [])
+
+        bids = [[float(item["price"]), float(item["quantity"])] for item in bids_data]
+        asks = [[float(item["price"]), float(item["quantity"])] for item in asks_data]
 
         best_bid = bids[0][0] if bids else 0.0
         best_ask = asks[0][0] if asks else 0.0
@@ -215,10 +229,9 @@ def fetch_binance_orderbook(symbol: str) -> dict:
 
         total_bid_vol = sum(q for p, q in bids)
         total_ask_vol = sum(q for p, q in asks)
-        total_bid_ask_ratio = (
-            total_bid_vol / total_ask_vol if total_ask_vol > 0 else 1.0
-        )
+        total_bid_ask_ratio = total_bid_vol / total_ask_vol if total_ask_vol > 0 else 1.0
 
+        logger.info(f"✓ Successfully fetched Wallex orderbook for {symbol}")
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
@@ -228,7 +241,7 @@ def fetch_binance_orderbook(symbol: str) -> dict:
             "total_bid_ask_ratio": total_bid_ask_ratio,
         }
     except Exception as e:
-        logger.error(f"Error fetching Binance orderbook for {symbol}: {e}")
+        logger.error(f"Error fetching Wallex orderbook for {symbol}: {e}")
         return {
             "best_bid": 0.0,
             "best_ask": 0.0,
@@ -358,7 +371,7 @@ def run_signal_cycle(notifier: Optional[TelegramNotifier], client: genai.Client)
         logger.info(f"Analyzing {coin}...")
 
         # 1. Fetch candles
-        candles = fetch_binance_candles(symbol)
+        candles = fetch_candles(symbol)
         if len(candles) < 200:
             logger.warning(
                 f"Insufficient candles fetched for {coin}. Skipping analysis."
@@ -369,7 +382,7 @@ def run_signal_cycle(notifier: Optional[TelegramNotifier], client: genai.Client)
         indicators = calculate_indicators(candles)
 
         # 3. Fetch Orderbook
-        orderbook = fetch_binance_orderbook(symbol)
+        orderbook = fetch_orderbook(symbol)
 
         # 4. Request AI Signal
         report = get_crypto_signal(client, coin, indicators, orderbook)
