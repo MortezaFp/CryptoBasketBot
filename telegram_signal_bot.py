@@ -140,7 +140,7 @@ def fetch_candles(symbol: str) -> list:
                         "volume": float(data["v"][i]),
                     }
                 )
-            logger.info(f"✓ Successfully fetched Wallex candles for {symbol}")
+            logger.info(f"[OK] Successfully fetched Wallex candles for {symbol}")
             return candles
         return []
     except Exception as e:
@@ -231,7 +231,7 @@ def fetch_orderbook(symbol: str) -> dict:
         total_ask_vol = sum(q for p, q in asks)
         total_bid_ask_ratio = total_bid_vol / total_ask_vol if total_ask_vol > 0 else 1.0
 
-        logger.info(f"✓ Successfully fetched Wallex orderbook for {symbol}")
+        logger.info(f"[OK] Successfully fetched Wallex orderbook for {symbol}")
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
@@ -252,18 +252,87 @@ def fetch_orderbook(symbol: str) -> dict:
         }
 
 
-def get_crypto_signal(
-    client: genai.Client, coin: str, indicators: dict, orderbook: dict
-) -> str:
-    """Calls Gemini LLM with Google Search tool enabled to synthesize news, CMC metrics, and technicals into Persian"""
-    prompt = f"""
-You are a highly experienced quantitative cryptocurrency trader and market researcher.
-Analyze the provided Binance and technical data for {coin} (against USDT), and search for live CoinMarketCap and news updates to generate a comprehensive analysis and trading signal.
+def fetch_cmc_data_and_news(coin: str) -> dict:
+    """Fetches CoinMarketCap metrics and latest news directly using public APIs"""
+    slugs = {
+        "BTC": "bitcoin",
+        "ETH": "ethereum",
+        "SOL": "solana",
+        "ADA": "cardano",
+        "XRP": "xrp"
+    }
+    slug = slugs.get(coin, coin.lower())
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    result = {
+        "rank": "N/A",
+        "market_cap": 0.0,
+        "volume_24h": 0.0,
+        "price_change_24h": 0.0,
+        "news": []
+    }
+    
+    try:
+        # 1. Fetch coin detail metrics
+        url = f"https://api.coinmarketcap.com/data-api/v3/cryptocurrency/detail?slug={slug}"
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            coin_id = data.get("id")
+            stats = data.get("statistics", {})
+            
+            result["rank"] = stats.get("rank", "N/A")
+            result["market_cap"] = stats.get("marketCap", 0.0)
+            result["volume_24h"] = stats.get("volume24h", 0.0)
+            result["price_change_24h"] = stats.get("priceChangePercentage24h", 0.0)
+            
+            # 2. Fetch latest news for this coin using the retrieved coin_id
+            if coin_id:
+                news_url = f"https://api.coinmarketcap.com/content/v3/news?coins={coin_id}&page=1&size=5"
+                news_resp = requests.get(news_url, headers=headers, timeout=12)
+                if news_resp.status_code == 200:
+                    news_data = news_resp.json().get("data", [])
+                    news_list = []
+                    for item in news_data[:3]: # top 3 news items
+                        meta = item.get("meta", {})
+                        title = meta.get("title")
+                        subtitle = meta.get("subtitle")
+                        if title:
+                            news_list.append({
+                                "title": title,
+                                "subtitle": subtitle or ""
+                            })
+                    result["news"] = news_list
+        logger.info(f"[OK] Successfully fetched CoinMarketCap data for {coin}")
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching CoinMarketCap data for {coin}: {e}")
+        return result
 
---- DATA FOR {coin}USDT ---
+
+def get_crypto_signal(
+    client: genai.Client, coin: str, indicators: dict, orderbook: dict, cmc_data: dict
+) -> str:
+    """Calls Gemini LLM to analyze coin metrics and generate an HTML-formatted Persian Telegram signal"""
+    
+    # Format the news items into a string for the prompt
+    news_str = ""
+    if cmc_data.get("news"):
+        for i, item in enumerate(cmc_data["news"], 1):
+            news_str += f"{i}. {item['title']}\n"
+            if item.get("subtitle"):
+                news_str += f"   - {item['subtitle']}\n"
+    else:
+        news_str = "No recent news found.\n"
+        
+    prompt = f"""
+You are a highly experienced quantitative cryptocurrency trader and senior market analyst.
+Your task is to analyze the provided market and sentiment data for {coin} (against USDT) and output a beautifully formatted, professional Telegram signal message in Persian (Farsi).
+
+--- MARKET DATA FOR {coin} ---
 Current Price: {indicators['close']:.4f}
 Open/High/Low: Open={indicators['open']:.4f}, High={indicators['high']:.4f}, Low={indicators['low']:.4f}
-24h Volume: {indicators['volume']:.2f}
+24h Volume (Wallex): {indicators['volume']:.2f}
 
 Technical Indicators (1h chart):
 - SMA 200: {indicators['sma_200']:.4f}
@@ -279,29 +348,60 @@ Order Book Metrics:
 - Bid/Ask Volume Ratio (Top 5 levels): {orderbook['bid_ask_ratio_5']:.2f}
 - Bid/Ask Volume Ratio (Top 20 levels): {orderbook['total_bid_ask_ratio']:.2f}
 
---- INSTRUCTIONS ---
-1. Use Google Search to check CoinMarketCap for {coin} (e.g. current market cap, CMC rank, 24h trading volume, supply metrics) and look up recent news/events or social media sentiment related to {coin} in the last 24 hours.
-2. Synthesize all findings: CoinMarketCap stats, recent news, orderbook depth/spread imbalance, and technical chart indicators.
-3. Formulate a clear trading recommendation: BUY (خرید), SELL (فروش), or HOLD (نگهداری).
-4. Assign a Confidence Score (اعتبار/اطمینان) between 0% and 100%.
-5. If the recommendation is BUY, define clear steps to execute the trade:
-   - Recommended entry range (محدوده خرید پیشنهادی)
-   - Target price goals / Take Profit (اهداف قیمتی)
-   - Stop Loss (حد ضرر)
-6. Write a beautifully structured Telegram update in Persian (Farsi) using HTML tags (like <b>, <i>, <code>) and emojis for visual appeal. Do NOT use markdown asterisks (like **).
+CoinMarketCap Statistics:
+- Rank: {cmc_data.get('rank', 'N/A')}
+- Market Cap: ${cmc_data.get('market_cap', 0.0):,.0f}
+- 24h Trading Volume: ${cmc_data.get('volume_24h', 0.0):,.0f}
+- 24h Price Change Percentage: {cmc_data.get('price_change_24h', 0.0):+.2f}%
 
-Format the Persian Telegram message as follows:
-• A header identifying the coin, date, and signal (use 🟢 for BUY, 🔴 for SELL, 🟡 for HOLD)
-• 💵 قیمت فعلی: current price
-• 📊 وضعیت کوین‌مارکت‌کپ و اخبار: detailed summary of rank, market cap, news found via search
-• ⚙️ تحلیل تکنیکال (بایننس): analysis of indicators, trends, Bollinger Bands, RSI
-• ⚖️ تحلیل دفتر سفارشات: spread and buyer vs. seller depth
-• 🎯 سیگنال نهایی:
-  - سیگنال: [خرید / فروش / نگهداری]
-  - درصد اطمینان: [X%]
-  - مراحل خرید و حد ضرر (if buy signal)
+Latest News Headlines:
+{news_str}
 
-Output ONLY the final HTML-formatted Persian Telegram message, with no English wrappers or preambles.
+--- TELEGRAM FORMATTING INSTRUCTIONS ---
+You must write a beautifully structured message in Persian (Farsi) using Telegram HTML tags.
+Follow these guidelines to create a modern, sleek interface layout:
+1. Identify the coin, signal, and current price in the header. Use an emoji based on the signal (🟢 for BUY, 🔴 for SELL, 🟡 for HOLD).
+2. The main signal recommendation, confidence percentage, and trade coordinates (Entry range, Target price levels, Stop Loss) MUST be visible in the main message body.
+3. ALL detailed sub-analyses MUST be placed inside Telegram's modern **expandable blockquotes** so the message is extremely clean, compact, and readers can tap to expand details. To do this, wrap the sections in `<blockquote expandable>...</blockquote>` tags.
+4. IMPORTANT: Do NOT use `<br>` or `<br/>` tags for line breaks as Telegram Bot API throws parsing errors for them. Simply use standard newline characters (`\n`) in your output.
+5. Use monospaced font `<code>` tags for prices, numbers, and targets to make them easy to read.
+
+Message structure in Persian:
+- Header: e.g. 📊 **سیگنال خرید #{coin}** (🟢/🔴/🟡)
+- 💵 **قیمت فعلی**: <code>${indicators['close']:,}</code>
+- 🎯 **سیگنال نهایی**:
+  - **پیشنهاد**: [خرید / فروش / نگهداری]
+  - **درصد اطمینان**: <code>[X%]</code>
+- 🚀 **مراحل ورود پیشنهادی** (Only if BUY/HOLD):
+  - **محدوده خرید پیشنهادی**: <code>[Price Range]</code>
+  - **اهداف قیمتی (Take Profit)**:
+    - هدف اول: <code>[Target 1]</code>
+    - هدف دوم: <code>[Target 2]</code>
+  - 🛑 **حد ضرر (Stop Loss)**: <code>[Stop Loss Price]</code>
+  
+- Expandable Block 1:
+<blockquote expandable>📊 <b>آمار کوین‌مارکت‌کپ و اخبار اخیر:</b>
+رتبه کوین‌مارکت‌کپ: <code>#{cmc_data.get('rank', 'N/A')}</code>
+ارزش بازار: <code>${cmc_data.get('market_cap', 0.0):,.0f} دلار</code>
+تغییرات ۲۴ ساعته: <code>{cmc_data.get('price_change_24h', 0.0):+.2f}%</code>
+
+<b>اخبار و رویدادهای مهم:</b>
+[Summarize/translate news items here in Persian]</blockquote>
+
+- Expandable Block 2:
+<blockquote expandable>⚙️ <b>تحلیل تکنیکال (تحلیل اندیکاتورها):</b>
+RSI: <code>{indicators['rsi']:.2f}</code>
+SMA 200: <code>{indicators['sma_200']:.4f}</code>
+وضعیت باندهای بولینگر و میانگین‌های متحرک... [Short technical vibe summary]</blockquote>
+
+- Expandable Block 3:
+<blockquote expandable>⚖️ <b>تحلیل دفتر سفارشات (Orderbook):</b>
+اسپرد قیمت: <code>{orderbook['spread_pct']:.4f}%</code>
+نسبت خریداران به فروشندگان (۵ سطح): <code>{orderbook['bid_ask_ratio_5']:.2f}</code>
+نسبت کل عمق: <code>{orderbook['total_bid_ask_ratio']:.2f}</code>
+[Short volume flow summary]</blockquote>
+
+Output ONLY the raw HTML message in Persian, with no markdown code block formatting (like ```html ... ```). Keep it clean.
 """
 
     models_to_try = [
@@ -311,51 +411,32 @@ Output ONLY the final HTML-formatted Persian Telegram message, with no English w
         "gemma-4-31b-it",
     ]
 
-    # Attempt with Google Search Grounding
     for model in models_to_try:
         try:
-            logger.info(
-                f"Requesting analysis from {model} with search grounding for {coin}..."
-            )
+            logger.info(f"Requesting analysis from {model} for {coin}...")
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
                     temperature=0.2,
                 ),
             )
             if response and response.text:
-                return response.text.strip()
+                res_text = response.text.strip()
+                # Clean up any potential markdown wrap if the model ignored instructions
+                if res_text.startswith("```"):
+                    res_text = res_text.split("\n", 1)[1]
+                if res_text.endswith("```"):
+                    res_text = res_text.rsplit("\n", 1)[0]
+                
+                # Sanitize any <br> tags the model might output
+                res_text = res_text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+                return res_text.strip()
         except Exception as e:
             logger.error(
-                f"Error generating signal with search tool on {model} for {coin}: {e}"
+                f"Error generating signal on {model} for {coin}: {e}"
             )
-            time.sleep(2)
-
-    # Fallback: Attempt without search tool
-    for model in models_to_try:
-        try:
-            logger.info(
-                f"Requesting fallback analysis from {model} (no search grounding) for {coin}..."
-            )
-            fallback_prompt = (
-                prompt
-                + "\n\nNote: Google Search is not available for this run. Provide analysis based on internal knowledge and the provided Binance stats."
-            )
-            response = client.models.generate_content(
-                model=model,
-                contents=fallback_prompt,
-                config=types.GenerateContentConfig(temperature=0.2),
-            )
-            if response and response.text:
-                return (
-                    response.text.strip()
-                    + "\n\n<i>(توجه: به دلیل محدودیت ارتباطی، اطلاعات زنده کوین‌مارکت‌کپ و اخبار در این تحلیل لحاظ نشده است)</i>"
-                )
-        except Exception as e:
-            logger.error(f"Fallback analysis failed on {model} for {coin}: {e}")
-            time.sleep(2)
+            time.sleep(1)
 
     return f"❌ <b>خطا در تحلیل {coin}</b>\nمتأسفانه ارتباط با هوش مصنوعی برقرار نشد."
 
@@ -384,10 +465,13 @@ def run_signal_cycle(notifier: Optional[TelegramNotifier], client: genai.Client)
         # 3. Fetch Orderbook
         orderbook = fetch_orderbook(symbol)
 
-        # 4. Request AI Signal
-        report = get_crypto_signal(client, coin, indicators, orderbook)
+        # 4. Fetch CoinMarketCap and news data directly
+        cmc_data = fetch_cmc_data_and_news(coin)
 
-        # 5. Notify via Telegram
+        # 5. Request AI Signal
+        report = get_crypto_signal(client, coin, indicators, orderbook, cmc_data)
+
+        # 6. Notify via Telegram
         if notifier:
             logger.info(f"Queueing Telegram notification for {coin}...")
             # Limit check (Telegram's message limit is 4096 characters)
@@ -434,7 +518,7 @@ def main():
         if chat_ids:
             notifier = TelegramNotifier(tg_token, chat_ids)
             logger.info(
-                f"✓ Telegram notifications successfully initialized for {len(chat_ids)} chats"
+                f"[OK] Telegram notifications successfully initialized for {len(chat_ids)} chats"
             )
         else:
             logger.warning("Telegram chat_id was empty or invalid.")
