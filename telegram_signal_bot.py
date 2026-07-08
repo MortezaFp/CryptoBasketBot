@@ -15,6 +15,8 @@ import requests
 import queue
 import threading
 import configparser
+import re
+from html.parser import HTMLParser
 import pandas as pd
 import pandas_ta as ta
 from typing import Tuple, Optional
@@ -34,6 +36,88 @@ TARGET_COINS = ["BTC", "ETH", "SOL", "ADA", "XRP"]
 SLEEP_INTERVAL = 3600  # 1 hour in seconds
 
 
+class TelegramHTMLSanitizer(HTMLParser):
+    """Parses and sanitizes HTML text to ensure it complies with Telegram's supported tag list,
+    escapes raw characters, and fixes nesting/unclosed tags to prevent sendMessage parsing errors."""
+    def __init__(self):
+        super().__init__()
+        self.result = []
+        self.tag_stack = []
+        self.supported_tags = {
+            "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+            "span", "tg-spoiler", "a", "code", "pre", "blockquote"
+        }
+        
+    def handle_starttag(self, tag, attrs):
+        if tag in self.supported_tags:
+            # Check for blockquote expandable
+            if tag == "blockquote":
+                is_expandable = any(attr[0] == "expandable" for attr in attrs)
+                if is_expandable:
+                    self.result.append('<blockquote expandable>')
+                else:
+                    self.result.append('<blockquote>')
+            elif tag == "span":
+                # Only keep tg-spoiler spans
+                has_spoiler = any(attr[0] == "class" and attr[1] == "tg-spoiler" for attr in attrs)
+                if has_spoiler:
+                    self.result.append('<span class="tg-spoiler">')
+                else:
+                    tag = None # ignore
+            elif tag == "a":
+                href = next((attr[1] for attr in attrs if attr[0] == "href"), None)
+                if href:
+                    self.result.append(f'<a href="{href}">')
+                else:
+                    tag = None
+            else:
+                self.result.append(f"<{tag}>")
+            
+            if tag:
+                self.tag_stack.append(tag)
+        elif tag in ("br", "p", "div", "li"):
+            self.result.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.supported_tags:
+            if tag in self.tag_stack:
+                while self.tag_stack:
+                    top_tag = self.tag_stack.pop()
+                    self.result.append(f"</{top_tag}>")
+                    if top_tag == tag:
+                        break
+        elif tag in ("p", "div", "li"):
+            self.result.append("\n")
+
+    def handle_data(self, data):
+        # Escape raw characters for Telegram HTML parser
+        escaped = data.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        self.result.append(escaped)
+
+    def get_clean_html(self) -> str:
+        while self.tag_stack:
+            top_tag = self.tag_stack.pop()
+            self.result.append(f"</{top_tag}>")
+        cleaned = "".join(self.result)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        return cleaned.strip()
+
+
+def clean_telegram_html(html_text: str) -> str:
+    """Helper function to clean HTML for Telegram Bot API"""
+    try:
+        sanitizer = TelegramHTMLSanitizer()
+        sanitizer.feed(html_text)
+        return sanitizer.get_clean_html()
+    except Exception as e:
+        logger.error(f"HTML sanitization error: {e}")
+        # Basic fallback cleaning
+        text = html_text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+        text = re.sub(r'</?(p|div|ul|ol|li)[^>]*>', '\n', text)
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return text.strip()
+
+
 class TelegramNotifier:
     """Handles thread-safe, sequential Telegram notifications to preserve ordering for multiple chat IDs"""
 
@@ -48,7 +132,9 @@ class TelegramNotifier:
     def send_message(self, message: str, retries: int = 5):
         if not self.token or not self.chat_ids:
             return
-        self.queue.put((message, retries))
+        # Apply HTML validation and cleaning to message
+        cleaned_message = clean_telegram_html(message)
+        self.queue.put((cleaned_message, retries))
 
     def _worker_loop(self):
         while True:
@@ -113,38 +199,35 @@ def load_bot_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
 
 
 def fetch_candles(symbol: str) -> list:
-    """Fetches 1-hour klines (candles) from Wallex"""
+    """Fetches 1-hour klines (candles) from Coinbase Exchange"""
     try:
-        url = "https://api.wallex.ir/v1/udf/history"
-        end_ts = int(time.time())
-        start_ts = end_ts - (300 * 60 * 60) # 300 hours ago
-        params = {
-            "symbol": symbol,
-            "resolution": "60",
-            "from": start_ts,
-            "to": end_ts,
-        }
-        resp = requests.get(url, params=params, timeout=15)
+        product_id = symbol.replace("USDT", "-USDT")
+        url = f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+        # granularity=3600 is 1 hour
+        params = {"granularity": "3600"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-        if data.get("s") == "ok":
-            candles = []
-            for i in range(len(data["t"])):
-                candles.append(
-                    {
-                        "time": int(data["t"][i]),
-                        "open": float(data["o"][i]),
-                        "high": float(data["h"][i]),
-                        "low": float(data["l"][i]),
-                        "close": float(data["c"][i]),
-                        "volume": float(data["v"][i]),
-                    }
-                )
-            logger.info(f"[OK] Successfully fetched Wallex candles for {symbol}")
-            return candles
-        return []
+        
+        # Coinbase returns [time, low, high, open, close, volume] from newest to oldest
+        # We need to reverse the list to have oldest to newest
+        data = resp.json()[::-1]
+        candles = []
+        for item in data:
+            candles.append(
+                {
+                    "time": int(item[0]),
+                    "low": float(item[1]),
+                    "high": float(item[2]),
+                    "open": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                }
+            )
+        logger.info(f"[OK] Successfully fetched Coinbase candles for {symbol}")
+        return candles
     except Exception as e:
-        logger.error(f"Error fetching Wallex candles for {symbol}: {e}")
+        logger.error(f"Error fetching Coinbase candles for {symbol}: {e}")
         return []
 
 
@@ -203,20 +286,22 @@ def calculate_indicators(candles: list) -> dict:
 
 
 def fetch_orderbook(symbol: str) -> dict:
-    """Fetches orderbook depth from Wallex"""
+    """Fetches orderbook depth from Coinbase Exchange"""
     try:
-        url = "https://api.wallex.ir/v1/depth"
-        params = {"symbol": symbol}
-        resp = requests.get(url, params=params, timeout=10)
+        product_id = symbol.replace("USDT", "-USDT")
+        url = f"https://api.exchange.coinbase.com/products/{product_id}/book"
+        params = {"level": "2"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
 
-        result = data.get("result", {})
-        bids_data = result.get("bid", [])
-        asks_data = result.get("ask", [])
+        bids_data = data.get("bids", [])
+        asks_data = data.get("asks", [])
 
-        bids = [[float(item["price"]), float(item["quantity"])] for item in bids_data]
-        asks = [[float(item["price"]), float(item["quantity"])] for item in asks_data]
+        # Coinbase level 2 returns bids/asks as lists of [price, size, num-orders]
+        bids = [[float(item[0]), float(item[1])] for item in bids_data]
+        asks = [[float(item[0]), float(item[1])] for item in asks_data]
 
         best_bid = bids[0][0] if bids else 0.0
         best_ask = asks[0][0] if asks else 0.0
@@ -227,11 +312,11 @@ def fetch_orderbook(symbol: str) -> dict:
         ask_vol_5 = sum(q for p, q in asks[:5])
         bid_ask_ratio_5 = bid_vol_5 / ask_vol_5 if ask_vol_5 > 0 else 1.0
 
-        total_bid_vol = sum(q for p, q in bids)
-        total_ask_vol = sum(q for p, q in asks)
+        total_bid_vol = sum(q for p, q in bids[:20])
+        total_ask_vol = sum(q for p, q in asks[:20])
         total_bid_ask_ratio = total_bid_vol / total_ask_vol if total_ask_vol > 0 else 1.0
 
-        logger.info(f"[OK] Successfully fetched Wallex orderbook for {symbol}")
+        logger.info(f"[OK] Successfully fetched Coinbase orderbook for {symbol}")
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
@@ -241,7 +326,7 @@ def fetch_orderbook(symbol: str) -> dict:
             "total_bid_ask_ratio": total_bid_ask_ratio,
         }
     except Exception as e:
-        logger.error(f"Error fetching Wallex orderbook for {symbol}: {e}")
+        logger.error(f"Error fetching Coinbase orderbook for {symbol}: {e}")
         return {
             "best_bid": 0.0,
             "best_ask": 0.0,
@@ -325,83 +410,67 @@ def get_crypto_signal(
     else:
         news_str = "No recent news found.\n"
         
-    prompt = f"""
+    system_instruction = """
 You are a highly experienced quantitative cryptocurrency trader and senior market analyst.
-Your task is to analyze the provided market and sentiment data for {coin} (against USDT) and output a beautifully formatted, professional Telegram signal message in Persian (Farsi).
+Your job is to analyze technical, orderbook, and CoinMarketCap data for a coin, and output a beautifully structured Persian (Farsi) signal message for Telegram.
 
---- MARKET DATA FOR {coin} ---
-Current Price: {indicators['close']:.4f}
-Open/High/Low: Open={indicators['open']:.4f}, High={indicators['high']:.4f}, Low={indicators['low']:.4f}
-24h Volume (Wallex): {indicators['volume']:.2f}
+CRITICAL FORMATTING CONSTRAINTS:
+1. You MUST use HTML tags for formatting. Do NOT use markdown bold/italic (e.g. do NOT use ** or * or _). Use <b>, <i>, <code>, <pre>, and <blockquote expandable>.
+2. Do NOT use HTML tables (<table>) or markdown tables (with pipes |). Instead, present indicators and metrics as clean bulleted lists using <b> and <code>.
+3. Use standard newlines (\n) for line breaks.
+4. You MUST wrap the detailed sub-analyses in <blockquote expandable>...</blockquote> tags exactly as specified in the template.
+5. All prices, percentages, ranks, and targets MUST be wrapped in <code>...</code> tags for easy reading.
+6. The entire output must be valid, well-formed HTML.
+"""
 
-Technical Indicators (1h chart):
-- SMA 200: {indicators['sma_200']:.4f}
-- EMA 9: {indicators['ema_9']:.4f}
-- EMA 21: {indicators['ema_21']:.4f}
-- RSI (14): {indicators['rsi']:.2f}
-- Bollinger Bands: Upper={indicators['bb_upper']:.4f}, Mid={indicators['bb_mid']:.4f}, Lower={indicators['bb_lower']:.4f}
-- ATR (14): {indicators['atr']:.4f}
+    prompt = f"""
+Generate the Telegram signal for {coin} using the exact HTML structure below.
+Fill in the text and data placeholders (enclosed in brackets like [Placeholder]) with your professional analysis in Persian, while keeping all the HTML tags exactly as they are.
 
-Order Book Metrics:
-- Best Bid: {orderbook['best_bid']:.4f} | Best Ask: {orderbook['best_ask']:.4f}
-- Bid-Ask Spread: {orderbook['spread']:.4f} ({orderbook['spread_pct']:.4f}%)
-- Bid/Ask Volume Ratio (Top 5 levels): {orderbook['bid_ask_ratio_5']:.2f}
-- Bid/Ask Volume Ratio (Top 20 levels): {orderbook['total_bid_ask_ratio']:.2f}
+--- TEMPLATE TO FILL ---
+📊 <b>سیگنال [خرید/فروش/نگهداری] #{coin} [🟢/🔴/🟡]</b>
 
-CoinMarketCap Statistics:
-- Rank: {cmc_data.get('rank', 'N/A')}
-- Market Cap: ${cmc_data.get('market_cap', 0.0):,.0f}
-- 24h Trading Volume: ${cmc_data.get('volume_24h', 0.0):,.0f}
-- 24h Price Change Percentage: {cmc_data.get('price_change_24h', 0.0):+.2f}%
+💵 <b>قیمت فعلی:</b> <code>${indicators['close']:.4f}</code>
 
-Latest News Headlines:
-{news_str}
+🎯 <b>سیگنال نهایی:</b>
+• <b>پیشنهاد:</b> [خرید / فروش / نگهداری - مثلاً خرید پله‌ای در محدوده حمایتی]
+• <b>درصد اطمینان:</b> <code>[X%]</code>
 
---- TELEGRAM FORMATTING INSTRUCTIONS ---
-You must write a beautifully structured message in Persian (Farsi) using Telegram HTML tags.
-Follow these guidelines to create a modern, sleek interface layout:
-1. Identify the coin, signal, and current price in the header. Use an emoji based on the signal (🟢 for BUY, 🔴 for SELL, 🟡 for HOLD).
-2. The main signal recommendation, confidence percentage, and trade coordinates (Entry range, Target price levels, Stop Loss) MUST be visible in the main message body.
-3. ALL detailed sub-analyses MUST be placed inside Telegram's modern **expandable blockquotes** so the message is extremely clean, compact, and readers can tap to expand details. To do this, wrap the sections in `<blockquote expandable>...</blockquote>` tags.
-4. IMPORTANT: Do NOT use `<br>` or `<br/>` tags for line breaks as Telegram Bot API throws parsing errors for them. Simply use standard newline characters (`\n`) in your output.
-5. Use monospaced font `<code>` tags for prices, numbers, and targets to make them easy to read.
+🚀 <b>مراحل ورود پیشنهادی:</b>
+• <b>محدوده خرید پیشنهادی:</b> <code>${indicators['close']*0.99:.4f} - ${indicators['close']*1.01:.4f}</code>
+• <b>اهداف قیمتی (Take Profit):</b>
+  ۱. هدف اول: <code>[قیمت هدف اول]</code>
+  ۲. هدف دوم: <code>[قیمت هدف دوم]</code>
+• 🛑 <b>حد ضرر (Stop Loss):</b> <code>[قیمت حد ضرر]</code>
 
-Message structure in Persian:
-- Header: e.g. 📊 **سیگنال خرید #{coin}** (🟢/🔴/🟡)
-- 💵 **قیمت فعلی**: <code>${indicators['close']:,}</code>
-- 🎯 **سیگنال نهایی**:
-  - **پیشنهاد**: [خرید / فروش / نگهداری]
-  - **درصد اطمینان**: <code>[X%]</code>
-- 🚀 **مراحل ورود پیشنهادی** (Only if BUY/HOLD):
-  - **محدوده خرید پیشنهادی**: <code>[Price Range]</code>
-  - **اهداف قیمتی (Take Profit)**:
-    - هدف اول: <code>[Target 1]</code>
-    - هدف دوم: <code>[Target 2]</code>
-  - 🛑 **حد ضرر (Stop Loss)**: <code>[Stop Loss Price]</code>
-  
-- Expandable Block 1:
 <blockquote expandable>📊 <b>آمار کوین‌مارکت‌کپ و اخبار اخیر:</b>
-رتبه کوین‌مارکت‌کپ: <code>#{cmc_data.get('rank', 'N/A')}</code>
-ارزش بازار: <code>${cmc_data.get('market_cap', 0.0):,.0f} دلار</code>
-تغییرات ۲۴ ساعته: <code>{cmc_data.get('price_change_24h', 0.0):+.2f}%</code>
+• رتبه کوین‌مارکت‌کپ: <code>#{cmc_data.get('rank', 'N/A')}</code>
+• ارزش بازار: <code>${cmc_data.get('market_cap', 0.0):,.0f} دلار</code>
+• تغییرات ۲۴ ساعته: <code>{cmc_data.get('price_change_24h', 0.0):+.2f}%</code>
 
 <b>اخبار و رویدادهای مهم:</b>
-[Summarize/translate news items here in Persian]</blockquote>
+[خلاصه یا ترجمه کوتاه فارسی اخبار زیر در ۳ بند]:
+{news_str}</blockquote>
 
-- Expandable Block 2:
-<blockquote expandable>⚙️ <b>تحلیل تکنیکال (تحلیل اندیکاتورها):</b>
-RSI: <code>{indicators['rsi']:.2f}</code>
-SMA 200: <code>{indicators['sma_200']:.4f}</code>
-وضعیت باندهای بولینگر و میانگین‌های متحرک... [Short technical vibe summary]</blockquote>
+<blockquote expandable>⚙️ <b>تحلیل تکنیکال (کوین‌بیس - جهانی):</b>
+• <b>شاخص RSI (14):</b> <code>{indicators['rsi']:.2f}</code> ([اشباع خرید / اشباع فروش / خنثی])
+• <b>میانگین SMA 200:</b> <code>{indicators['sma_200']:.4f}</code> ([بالای SMA / پایین SMA / در حال برخورد])
+• <b>میانگین EMA 9 / 21:</b> <code>{indicators['ema_9']:.4f} / {indicators['ema_21']:.4f}</code> ([تقاطع صعودی / تقاطع نزولی])
+• <b>باندهای بولینگر:</b> <code>{indicators['bb_lower']:.4f} - {indicators['bb_upper']:.4f}</code> ([نزدیک باند پایین / نزدیک باند بالا / خنثی])
+• <b>شاخص ATR (14):</b> <code>{indicators['atr']:.4f}</code> ([نوسان شدید / نوسان ملایم])
 
-- Expandable Block 3:
-<blockquote expandable>⚖️ <b>تحلیل دفتر سفارشات (Orderbook):</b>
-اسپرد قیمت: <code>{orderbook['spread_pct']:.4f}%</code>
-نسبت خریداران به فروشندگان (۵ سطح): <code>{orderbook['bid_ask_ratio_5']:.2f}</code>
-نسبت کل عمق: <code>{orderbook['total_bid_ask_ratio']:.2f}</code>
-[Short volume flow summary]</blockquote>
+<b>توضیح تکنیکال:</b>
+[۱ الی ۲ خط تحلیل روند تکنیکال به فارسی]</blockquote>
 
-Output ONLY the raw HTML message in Persian, with no markdown code block formatting (like ```html ... ```). Keep it clean.
+<blockquote expandable>⚖️ <b>تحلیل دفتر سفارشات (کوین‌بیس):</b>
+• <b>بهترین قیمت خرید (Bid):</b> <code>{orderbook['best_bid']:.4f}</code>
+• <b>بهترین قیمت فروش (Ask):</b> <code>{orderbook['best_ask']:.4f}</code>
+• <b>اسپرد قیمت (Spread):</b> <code>{orderbook['spread']:.4f} ({orderbook['spread_pct']:.4f}%)</code>
+• <b>نسبت حجم (۵ لایه اول):</b> <code>{orderbook['bid_ask_ratio_5']:.2f}</code>
+• <b>نسبت حجم (۲۰ لایه اول):</b> <code>{orderbook['total_bid_ask_ratio']:.2f}</code>
+
+<b>توضیح دفتر سفارشات:</b>
+[۱ الی ۲ خط تحلیل عمق بازار و خریدار/فروشنده به فارسی]</blockquote>
 """
 
     models_to_try = [
@@ -418,7 +487,8 @@ Output ONLY the raw HTML message in Persian, with no markdown code block formatt
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,
+                    system_instruction=system_instruction,
+                    temperature=0.1,
                 ),
             )
             if response and response.text:
